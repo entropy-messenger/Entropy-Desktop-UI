@@ -42,6 +42,12 @@ Entropy Desktop is a native cross-platform desktop application with a security-f
 - **Crypto Library**: `libsodium` (via sodium-native bindings) + custom Rust implementations for Ed25519, X25519, and Kyber1024.
 - **Network**: WebSockets over TLS for real-time messaging. Optional SOCKS5 proxy support for Tor/I2P routing.
 
+### Why Rust?
+We explicitly chose to build the core backend logic in Rust rather than JavaScript/Node.js to provide a hardened security layer.
+- **Process Isolation**: In a standard web application, a "Cross-Site Scripting" (XSS) compromise allows an attacker to read *any* data in the application's memory, including private keys. By moving sensitive logic to Rust, we create a hardware-enforced boundary. Even if the frontend (UI) is compromised by a malicious server response, it physically cannot read the memory of the backend where your keys live, because the Operating System isolates these two processes.
+- **Immutable Logic**: Unlike interpreted JavaScript which can be modified at runtime (e.g., via "Prototype Pollution"), the Rust backend is compiled machine code. A malicious server cannot inject new code to alter the encryption protocols or exfiltrate data.
+- **Memory Safety**: Rust's ownership model guarantees memory safety at compile-time, eliminating entire classes of vulnerabilities like buffer overflows that could otherwise allow an attacker to bypass these isolation protections.
+
 ### Security Architecture
 - **Vault Encryption**: Your master password never leaves the device. It's used to derive a database encryption key via PBKDF2 with a hardware-bound salt stored in the system keyring.
 - **Key Isolation**: Private keys are generated and stored exclusively in the Rust backend. The TypeScript frontend never sees raw private key material.
