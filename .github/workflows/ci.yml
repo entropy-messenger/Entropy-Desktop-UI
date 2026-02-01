@@ -46,6 +46,9 @@ jobs:
     - name: Run Frontend Tests
       run: npm run test
 
+    - name: Build Frontend
+      run: npm run build
+
     - name: Run Backend Tests
       working-directory: ./src-tauri
       run: cargo test --verbose
