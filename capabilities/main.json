@@ -1,0 +1,16 @@
+{
+    "identifier": "main",
+    "description": "Main window capabilities",
+    "windows": [
+        "main"
+    ],
+    "permissions": [
+        "core:default",
+        "core:window:allow-start-dragging",
+        "core:webview:default",
+        "shell:default",
+        "notification:default",
+        "default",
+        "allow-commands"
+    ]
+}

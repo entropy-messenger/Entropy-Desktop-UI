@@ -1,0 +1,46 @@
+[[permission]]
+identifier = "allow-commands"
+description = "Allows all app commands"
+commands.allow = [
+    "store_secret",
+    "get_secret",
+    "init_vault",
+    "vault_save",
+    "vault_load",
+    "dump_vault",
+    "restore_vault",
+    "clear_vault",
+    "nuclear_reset",
+    "crypto_sha256",
+    "crypto_pbkdf2",
+    "crypto_encrypt",
+    "crypto_decrypt",
+    "crypto_mine_pow",
+    "protocol_init",
+    "protocol_establish_session",
+    "protocol_encrypt",
+    "protocol_decrypt",
+    "protocol_get_safety_number",
+    "protocol_encrypt_media",
+    "protocol_decrypt_media",
+    "protocol_get_pending",
+    "protocol_save_pending",
+    "protocol_remove_pending",
+    "protocol_replenish_pre_keys",
+    "protocol_verify_session",
+    "protocol_secure_vacuum",
+    "protocol_encrypt_sealed",
+    "protocol_decrypt_sealed",
+    "protocol_create_group_distribution",
+    "protocol_group_init",
+    "protocol_group_encrypt",
+    "protocol_group_decrypt",
+    "protocol_process_group_distribution",
+    "connect_network",
+    "send_to_network"
+]
+
+[[set]]
+identifier = "default"
+description = "Default permission set"
+permissions = ["allow-commands"]
