@@ -1,15 +1,13 @@
-use tauri::{Manager, Emitter};
+use tauri::Emitter;
 use tokio::sync::mpsc;
 use futures_util::{StreamExt, SinkExt};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, WebSocketStream};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
 use tokio_socks::tcp::Socks5Stream;
 use crate::app_state::NetworkState;
-use tokio::net::TcpStream;
-use tokio_tungstenite::MaybeTlsStream;
+// WS imports removed (unused)
 
-type WSStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
-type SocksWSStream = WebSocketStream<Socks5Stream<TcpStream>>;
+// WS types (currently used via generics)
 
 #[tauri::command]
 pub async fn connect_network(
@@ -79,14 +77,19 @@ where S: futures_util::Sink<Message> + StreamExt<Item = Result<Message, tokio_tu
 }
 
 #[tauri::command]
-pub async fn send_to_network(state: tauri::State<'_, NetworkState>, payload: String) -> Result<(), String> {
+pub async fn send_to_network(state: tauri::State<'_, NetworkState>, payload: String, is_binary: bool) -> Result<(), String> {
     let tx = {
         let lock = state.sender.lock().unwrap();
         lock.clone()
     };
     
     if let Some(sender) = tx {
-        sender.send(Message::Text(payload.into())).map_err(|e| e.to_string())?;
+        if is_binary {
+            let data = hex::decode(payload).map_err(|e| e.to_string())?;
+            sender.send(Message::Binary(data.into())).map_err(|e| e.to_string())?;
+        } else {
+            sender.send(Message::Text(payload.into())).map_err(|e| e.to_string())?;
+        }
         Ok(())
     } else {
         Err("Network not connected".to_string())
@@ -108,12 +111,12 @@ pub async fn get_link_preview(url: String, proxy_url: Option<String>) -> Result<
     let html = resp.text().await.map_err(|e| e.to_string())?;
 
     // Basic extraction
-    let mut title = url.clone();
-    let mut site_name = url.clone();
-    let mut description = String::new();
-    let mut image = String::new();
+    let title = url.clone();
+    let _site_name = url.clone();
+    let description = String::new();
+    let image = String::new();
 
-    if let Ok(dom) = html_parser::Dom::parse(&html) {
+    if let Ok(_dom) = html_parser::Dom::parse(&html) {
         // Iterate over meta tags (simplified logic)
         // In a real implementation we'd use a better scraper, but this is a start
         // We'll search for <title>, and meta og:title, etc.
@@ -121,15 +124,16 @@ pub async fn get_link_preview(url: String, proxy_url: Option<String>) -> Result<
     }
 
     // fallback regex for title if parser is tricky for simple UI
+    let mut final_title = title;
     if let Some(t_match) = html.find("<title>") {
         if let Some(t_end) = html[t_match..].find("</title>") {
-            title = html[t_match+7 .. t_match+t_end].to_string();
+            final_title = html[t_match+7 .. t_match+t_end].to_string();
         }
     }
 
     Ok(serde_json::json!({
         "url": url,
-        "title": title.trim(),
+        "title": final_title.trim(),
         "siteName": url.split('/').nth(2).unwrap_or(""),
         "description": description,
         "image": image

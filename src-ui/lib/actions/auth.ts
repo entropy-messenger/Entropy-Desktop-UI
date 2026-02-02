@@ -11,6 +11,7 @@ import { attachmentStore } from '../attachment_store';
 import type { Chat } from '../types';
 
 let isAuthInProgress = false;
+export const resetAuthStatus = () => { isAuthInProgress = false; };
 
 export const initApp = async (password: string) => {
     userStore.update(s => ({ ...s, authError: null }));
@@ -20,17 +21,24 @@ export const initApp = async (password: string) => {
 
     try {
         await initVault(password);
-    } catch (e) {
-        console.error("Vault init failed (wrong password?):", e);
-        handleFailedAttempt(attemptsKey);
+    } catch (e: any) {
+        console.error("Vault init failed:", e);
+        const errorMsg = e.message || e.toString();
+        if (errorMsg.includes("encryption key") || errorMsg.includes("passphrase")) {
+            handleFailedAttempt(attemptsKey);
+        } else {
+            userStore.update(s => ({ ...s, authError: `System Error: ${errorMsg}` }));
+        }
         return;
     }
 
     let idHash: string | null = null;
     try {
         idHash = await signalManager.init(password, false);
-    } catch (e) {
+    } catch (e: any) {
         console.error("Signal init failed:", e);
+        userStore.update(s => ({ ...s, authError: `Identity Initialization Failed: ${e.message || e}` }));
+        return;
     }
 
     if (idHash) {

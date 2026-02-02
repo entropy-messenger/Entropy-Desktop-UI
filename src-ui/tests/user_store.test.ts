@@ -14,13 +14,17 @@ describe('userStore', () => {
             searchQuery: "",
             replyingTo: null,
             blockedHashes: [],
+            myGlobalNickname: null,
+            nicknameExpiry: null,
             privacySettings: {
                 readReceipts: true,
                 lastSeen: 'everyone',
                 profilePhoto: 'everyone',
                 routingMode: 'direct',
                 proxyUrl: 'socks5://127.0.0.1:9050',
-                decoyMode: true
+                decoyMode: true,
+                forceTurn: false,
+                iceServers: ['stun:stun.l.google.com:19302']
             },
             sessionToken: null,
             connectionStatus: 'disconnected',

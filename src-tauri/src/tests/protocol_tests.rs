@@ -366,3 +366,21 @@ fn test_pow_mining_logic() {
     let result = hasher.finalize();
     assert_eq!(hex::encode(result), hash);
 }
+
+#[test]
+fn test_pre_key_replenishment_cap() {
+    let mut identity = generate_new_identity();
+    assert_eq!(identity.pre_keys.len(), 10);
+
+    // Replenish with 120 more (Total 130) -> should cap at 100
+    identity.replenish_pre_keys(120);
+    assert_eq!(identity.pre_keys.len(), 100);
+
+    // Oldest key should be id 31 (130 - 100 + 1 if IDs are sequential from 1)
+    // Actually generate_new_identity starts at 1. 
+    // Initial: 1..10
+    // Replenish 120: new IDs are 11..130
+    // Total 130. Drain 30. Remaining: 31..130
+    assert_eq!(identity.pre_keys[0].key_id, 31);
+    assert_eq!(identity.pre_keys[99].key_id, 130);
+}

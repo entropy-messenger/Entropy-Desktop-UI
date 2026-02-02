@@ -42,27 +42,25 @@ export class NetworkLayer {
         if (this.userStoreModule) {
             const state = get(this.userStoreModule.userStore) as any;
             this.url = state.relayUrl.replace('http', 'ws') + '/ws';
-        }
+            const bearerToken = state.sessionToken;
 
-        let proxyUrl = undefined;
-        if (this.userStoreModule) {
-            const state = get(this.userStoreModule.userStore) as any;
+            let proxyUrl = undefined;
             if (state.privacySettings.routingMode !== 'direct') {
                 proxyUrl = state.privacySettings.proxyUrl;
                 if (state.privacySettings.routingMode === 'tor') {
                     proxyUrl = 'socks5://127.0.0.1:9050';
                 }
             }
-        }
 
-        console.log(`Commanding native connection to ${this.url} (Proxy: ${proxyUrl || 'none'})...`);
-        try {
-            await invoke('connect_network', { url: this.url, proxyUrl });
-            this.isConnected = true;
-            this.onConnect();
-        } catch (e) {
-            console.error("Native connection failed:", e);
-            this.retry();
+            console.log(`Commanding native connection to ${this.url} (Proxy: ${proxyUrl || 'none'})...`);
+            try {
+                await invoke('connect_network', { relayUrl: this.url, bearerToken, proxyUrl });
+                this.isConnected = true;
+                this.onConnect();
+            } catch (e) {
+                console.error("Native connection failed:", e);
+                this.retry();
+            }
         }
     }
 
@@ -185,11 +183,29 @@ export class NetworkLayer {
                     keysMissing: !!msg.keys_missing
                 }));
             }
+            if (this.logicStoreModule && this.logicStoreModule.resetAuthStatus) {
+                this.logicStoreModule.resetAuthStatus();
+            }
             return;
         }
 
         if (msg.type === 'error') {
             console.error("Server error:", msg.message);
+            if (msg.code === 'auth_failed') {
+                console.warn("Authentication failed (Token probably expired). Clearing session and re-mining...");
+                if (this.userStoreModule) {
+                    this.userStoreModule.userStore.update((s: any) => ({ ...s, sessionToken: null, connectionStatus: 'mining' }));
+                    if (this.logicStoreModule) {
+                        this.logicStoreModule.resetAuthStatus();
+                        import('svelte/store').then(({ get }) => {
+                            const state = get(this.userStoreModule.userStore) as any;
+                            if (state.identityHash) {
+                                this.logicStoreModule.authenticate(state.identityHash);
+                            }
+                        });
+                    }
+                }
+            }
             return;
         }
 
@@ -232,7 +248,7 @@ export class NetworkLayer {
     private async executeSendJSON(data: any) {
         if (!this.isConnected) return;
         try {
-            await invoke('send_to_network', { msg: JSON.stringify(data), isBinary: false });
+            await invoke('send_to_network', { payload: JSON.stringify(data), isBinary: false });
         } catch (e) {
             console.error("Native sendJSON failed", e);
         }
@@ -258,7 +274,7 @@ export class NetworkLayer {
         const hex = Array.from(packet).map(b => b.toString(16).padStart(2, '0')).join('');
 
         try {
-            await invoke('send_to_network', { msg: hex, isBinary: true });
+            await invoke('send_to_network', { payload: hex, isBinary: true });
         } catch (e) {
             console.error("Native sendBinary failed", e);
         }

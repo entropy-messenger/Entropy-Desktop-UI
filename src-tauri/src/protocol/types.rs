@@ -194,6 +194,11 @@ impl ProtocolIdentity {
                 private_key: encode_b64(pk_secret.to_bytes().as_slice()),
             });
         }
+
+        if self.pre_keys.len() > 100 {
+            let to_remove = self.pre_keys.len() - 100;
+            self.pre_keys.drain(0..to_remove);
+        }
     }
 }
 

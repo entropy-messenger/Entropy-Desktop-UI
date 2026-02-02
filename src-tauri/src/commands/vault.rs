@@ -53,6 +53,20 @@ pub fn init_vault(app: tauri::AppHandle, state: State<'_, DbState>, passphrase: 
     }
 
     let db_path = app_data_dir.join("vault.db");
+
+    // Close existing connection if any to release file locks
+    {
+        let mut conn_lock = state.conn.lock().unwrap();
+        if let Some(conn) = conn_lock.as_ref() {
+            // If already opened and functional, we can just return Ok
+            // This handles UI reloads without needing to re-open the file
+            if conn.execute("SELECT 1 FROM vault LIMIT 1;", []).is_ok() {
+                return Ok(());
+            }
+        }
+        *conn_lock = None;
+    }
+
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
 
     if let Err(e) = conn.pragma_update(None, "key", passphrase) {

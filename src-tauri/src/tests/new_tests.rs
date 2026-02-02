@@ -11,11 +11,11 @@ fn test_crypto_sha256() {
     assert_eq!(hash, "6a122b1e57313e10690bc07bfb5a3163352550a5bb19bab4263d1ce0f5f50939");
 }
 
-#[test]
-fn test_crypto_pbkdf2() {
+#[tokio::test]
+async fn test_crypto_pbkdf2() {
     let password = "password123".to_string();
     let salt = "somesalt".to_string();
-    let key = commands::crypto_pbkdf2(password, salt).unwrap();
+    let key = commands::crypto_pbkdf2(password, salt).await.unwrap();
     assert_eq!(key.len(), 32);
 }
 

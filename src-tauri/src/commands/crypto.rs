@@ -12,15 +12,17 @@ pub fn crypto_sha256(data: Vec<u8>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn crypto_pbkdf2(password: String, salt: String) -> Result<Vec<u8>, String> {
-    let mut key = [0u8; 32];
-    pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(
-        password.as_bytes(),
-        salt.as_bytes(),
-        100000,
-        &mut key,
-    ).map_err(|e| format!("{:?}", e))?;
-    Ok(key.to_vec())
+pub async fn crypto_pbkdf2(password: String, salt: String) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut key = [0u8; 32];
+        pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(
+            password.as_bytes(),
+            salt.as_bytes(),
+            100000,
+            &mut key,
+        ).map_err(|e| format!("{:?}", e))?;
+        Ok(key.to_vec())
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -54,9 +56,14 @@ pub fn crypto_decrypt(key: Vec<u8>, hex_data: String) -> Result<Vec<u8>, String>
 }
 
 #[tauri::command]
-pub fn crypto_mine_pow(seed: String, difficulty: u32, context: Option<String>) -> Result<serde_json::Value, String> {
+pub async fn crypto_mine_pow(seed: String, difficulty: u32, context: Option<String>) -> Result<serde_json::Value, String> {
     let ctx = context.unwrap_or_default();
-    let (nonce, hash) = protocol::mine_pow(&seed, difficulty, &ctx)?;
+    let seed_clone = seed.clone();
+    let ctx_clone = ctx.clone();
+    
+    let (nonce, hash) = tokio::task::spawn_blocking(move || {
+        protocol::mine_pow(&seed_clone, difficulty, &ctx_clone)
+    }).await.map_err(|e| e.to_string())??;
     
     Ok(serde_json::json!({
         "seed": seed,

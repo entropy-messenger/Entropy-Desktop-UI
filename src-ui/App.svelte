@@ -287,22 +287,24 @@
                                     </div>
                                 </div>
                                 <div class="space-y-2">
-                                    <div class="text-xl font-black text-gray-900 tracking-tight">Securing Network</div>
-                                    <div class="text-[12px] text-gray-500 font-medium leading-relaxed px-4">Establishing a zero-knowledge routing session. Computing proof-of-work to protect from spam...</div>
+                                    <div class="text-xl font-black text-gray-900 tracking-tight">Securing Session</div>
+                                    <div class="text-[12px] text-gray-500 font-medium leading-relaxed px-4">Computing cryptographic proof to protect your identity. This only happens once per session.</div>
                                 </div>
                             {:else if $userStore.connectionStatus === 'connecting'}
-                                <div class="w-20 h-20 border-4 border-gray-100 border-t-indigo-600 rounded-full animate-spin"></div>
+                                <div class="w-20 h-20 border-4 border-indigo-600/10 border-t-indigo-600 rounded-full animate-spin"></div>
                                 <div class="space-y-2">
-                                    <div class="text-xl font-black text-gray-900 tracking-tight">Authenticating</div>
-                                    <div class="text-[12px] text-gray-500 font-medium px-4">Handshaking with Entropy relay nodes...</div>
+                                    <div class="text-xl font-black text-gray-900 tracking-tight">Verifying Identity</div>
+                                    <div class="text-[12px] text-gray-500 font-medium px-4">
+                                        {$userStore.sessionToken ? 'Validating session token with relay...' : 'Handshaking with Entropy relay nodes...'}
+                                    </div>
                                 </div>
                             {:else}
-                                <div class="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center text-red-500 animate-pulse">
+                                <div class="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center text-amber-500 animate-pulse">
                                     <LucideWifiOff size={40} />
                                 </div>
                                 <div class="space-y-2">
-                                    <div class="text-xl font-black text-gray-900 tracking-tight">Connection Lost</div>
-                                    <div class="text-[12px] text-gray-500 font-medium px-4">Attempting to re-establish secure link to the decentralized network...</div>
+                                    <div class="text-xl font-black text-gray-900 tracking-tight">Reconnecting</div>
+                                    <div class="text-[12px] text-gray-500 font-medium px-4">The secure link was interrupted. Attempting to re-establish the connection...</div>
                                 </div>
                             {/if}
                         </div>

@@ -119,7 +119,7 @@
   };
 
   let showSettings = $state(false);
-  let settingsTab = $state<'profile' | 'privacy' | 'blocked'>('profile');
+  let settingsTab = $state<'profile' | 'privacy' | 'blocked' | 'audit'>('profile');
   let copied = $state(false);
   
   const toggleSettings = () => { 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NetworkLayer } from '../lib/network';
-
+import { invoke } from '@tauri-apps/api/core';
 
 vi.mock('@tauri-apps/api/core', () => ({
     invoke: vi.fn(),
@@ -15,13 +15,15 @@ vi.mock('svelte/store', async (importOriginal) => {
     return {
         ...actual,
         get: vi.fn((store: any) => {
-            if (store.mockData) return store.mockData;
-            return { relayUrl: 'http://localhost:8080', privacySettings: { routingMode: 'direct' } };
+            return {
+                relayUrl: 'http://localhost:8080',
+                privacySettings: { routingMode: 'direct' },
+                sessionToken: 'mock-token'
+            };
         }),
     };
 });
 
-import { invoke } from '@tauri-apps/api/core';
 
 describe('NetworkLayer', () => {
     let network: NetworkLayer;
@@ -47,7 +49,11 @@ describe('NetworkLayer', () => {
         };
 
         await network.connect();
-        expect(invoke).toHaveBeenCalledWith('connect_network', expect.anything());
+        expect(invoke).toHaveBeenCalledWith('connect_network', expect.objectContaining({
+            relayUrl: expect.stringContaining('ws://localhost:8080/ws'),
+            bearerToken: expect.anything(), // should match sessionToken
+            proxyUrl: undefined
+        }));
     });
 
     it('should queue messages when disconnected', async () => {

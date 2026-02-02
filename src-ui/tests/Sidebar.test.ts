@@ -51,6 +51,8 @@ describe('Sidebar Component', () => {
             replyingTo: null,
             privacySettings: {} as any,
             sessionToken: null,
+            myGlobalNickname: null,
+            nicknameExpiry: null,
             connectionStatus: 'connected',
             authError: null,
             keysMissing: false,

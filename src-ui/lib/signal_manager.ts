@@ -101,8 +101,8 @@ export class SignalManager {
             try {
                 identityBundle = await invoke('protocol_init');
             } catch (e) {
-                console.error("Protocol Init Failed:", e);
-                return null;
+                console.error("SignalManager: Protocol Init Invoke Failed. This usually means the vault wasn't correctly initialized in Rust.", e);
+                throw e; // Throw instead of returning null to allow caller to handle it
             }
 
 
@@ -197,7 +197,7 @@ export class SignalManager {
                 pq_publicKey: rustBundle.signed_pre_key.pq_public_key,
                 signature: rustBundle.signed_pre_key.signature
             },
-            preKeys: rustBundle.pre_keys.map((k: any) => ({
+            preKeys: rustBundle.pre_keys.slice(-100).map((k: any) => ({
                 keyId: k.key_id,
                 publicKey: k.public_key
             }))
@@ -238,7 +238,7 @@ export class SignalManager {
         localStorage.setItem('signal_keys_uploaded', 'true');
     }
 
-    async establishSession(recipientHash: string, serverUrl: string, useDecoys: boolean = false): Promise<string | null> {
+    async establishSession(recipientHash: string, serverUrl: string, useDecoys: boolean = false): Promise<{ ik: string, pq_ik: string } | null> {
         let bundle: any = null;
         if (!(this as any)._knownSessions || !(this as any)._knownSessions.has(recipientHash)) {
             if (!/^[0-9a-fA-F]+$/.test(recipientHash)) return null;
@@ -268,21 +268,26 @@ export class SignalManager {
             const response = await fetch(`${serverUrl}/keys/fetch?user=${recipientHash}`);
             if (response.ok) bundle = await response.json();
         }
-        return bundle?.identityKey || null;
+
+        if (!bundle) return null;
+        return {
+            ik: bundle.identityKey,
+            pq_ik: bundle.pq_identityKey || bundle.pq_identity_key
+        };
     }
 
     async encrypt(recipientHash: string, message: string, serverUrl: string, skipIntegrity: boolean = false): Promise<any> {
         return this.lock(async () => {
-            const remoteIk = await this.establishSession(recipientHash, serverUrl);
+            const remoteKeys = await this.establishSession(recipientHash, serverUrl);
 
             const ciphertext: any = await invoke('protocol_encrypt', {
                 remoteHash: recipientHash,
                 plaintext: message
             });
 
-            if (remoteIk) {
+            if (remoteKeys) {
                 try {
-                    return await this.seal(remoteIk, ciphertext);
+                    return await this.seal(remoteKeys.ik, remoteKeys.pq_ik, ciphertext);
                 } catch (e) {
                     console.warn("Sealing failed, falling back to unsealed message", e);
                 }
@@ -359,8 +364,12 @@ export class SignalManager {
         return await invoke('protocol_create_group_distribution', { groupId });
     }
 
-    async seal(remoteIdentityKey: string, message: any): Promise<any> {
-        return await invoke('protocol_encrypt_sealed', { remotePublicIdentityKey: remoteIdentityKey, messageBody: message });
+    async seal(remoteIdentityKey: string, remotePqIdentityKey: string, message: any): Promise<any> {
+        return await invoke('protocol_encrypt_sealed', {
+            remotePublicIdentityKey: remoteIdentityKey,
+            remotePqPublicIdentityKey: remotePqIdentityKey,
+            messageBody: message
+        });
     }
 
     async unseal(sealedObj: any): Promise<any> {
