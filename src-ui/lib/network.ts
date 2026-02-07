@@ -1,5 +1,9 @@
+
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { get } from 'svelte/store';
+import { userStore } from './stores/user';
+import * as logicStore from './store';
 import type { ServerMessage } from './types';
 
 export class NetworkLayer {
@@ -7,19 +11,10 @@ export class NetworkLayer {
     private retryCount = 0;
     private maxRetries = 5;
     private isAuthenticated = false;
-    private messageQueue: { type: 'json' | 'binary'; data: any; recipient?: string; isVolatile?: boolean }[] = [];
-    private heartbeatInterval: any;
     private isConnected = false;
-
-
-    private userStoreModule: any = null;
-    private logicStoreModule: any = null;
+    private lastActivity = Date.now();
 
     constructor() {
-        import('./stores/user').then(m => this.userStoreModule = m);
-        import('./store').then(m => this.logicStoreModule = m);
-
-
         listen('network-msg', (event) => {
             this.handleMessage(event.payload as string);
         });
@@ -35,35 +30,38 @@ export class NetworkLayer {
         });
     }
 
+    private connectingPromise: Promise<void> | null = null;
+
     async connect() {
         if (this.isConnected) return;
+        if (this.connectingPromise) return this.connectingPromise;
 
-        const { get } = await import('svelte/store');
-        if (this.userStoreModule) {
-            const state = get(this.userStoreModule.userStore) as any;
-            this.url = state.relayUrl.replace('http', 'ws') + '/ws';
-        }
+        this.connectingPromise = (async () => {
+            try {
+                this.url = get(userStore).relayUrl.replace('http', 'ws') + '/ws';
 
-        let proxyUrl = undefined;
-        if (this.userStoreModule) {
-            const state = get(this.userStoreModule.userStore) as any;
-            if (state.privacySettings.routingMode !== 'direct') {
-                proxyUrl = state.privacySettings.proxyUrl;
-                if (state.privacySettings.routingMode === 'tor') {
-                    proxyUrl = 'socks5://127.0.0.1:9050';
+                let proxyUrl = undefined;
+                const state = get(userStore) as any;
+                if (state.privacySettings.routingMode !== 'direct') {
+                    proxyUrl = state.privacySettings.proxyUrl;
+                    if (state.privacySettings.routingMode === 'tor') {
+                        proxyUrl = 'socks5://127.0.0.1:9050';
+                    }
                 }
-            }
-        }
 
-        console.log(`Commanding native connection to ${this.url} (Proxy: ${proxyUrl || 'none'})...`);
-        try {
-            await invoke('connect_network', { url: this.url, proxyUrl });
-            this.isConnected = true;
-            this.onConnect();
-        } catch (e) {
-            console.error("Native connection failed:", e);
-            this.retry();
-        }
+                console.log(`Commanding native connection to ${this.url} (Proxy: ${proxyUrl || 'none'})...`);
+                await invoke('connect_network', { url: this.url, proxyUrl });
+                this.isConnected = true;
+                this.onConnect();
+            } catch (e) {
+                console.error("Native connection failed:", e);
+                this.retry();
+            } finally {
+                this.connectingPromise = null;
+            }
+        })();
+
+        return this.connectingPromise;
     }
 
     private stabilityTimer: any = null;
@@ -71,49 +69,45 @@ export class NetworkLayer {
     private onConnect() {
         console.log('Native network layer connected');
 
-
-
         if (this.stabilityTimer) clearTimeout(this.stabilityTimer);
         this.stabilityTimer = setTimeout(() => {
             console.log("Connection stabilized. Resetting retry count.");
             this.retryCount = 0;
         }, 5000);
 
-        if (this.userStoreModule) {
-            this.userStoreModule.userStore.update((s: any) => ({ ...s, isConnected: true }));
+        userStore.update((s: any) => ({ ...s, isConnected: true }));
 
-            if (this.logicStoreModule) {
-                import('svelte/store').then(({ get }) => {
-                    const state = get(this.userStoreModule.userStore) as any;
-                    if (state.identityHash) {
-                        this.logicStoreModule.authenticate(state.identityHash);
-                    }
-                });
-            }
+        const state = get(userStore) as any;
+        if (state.identityHash) {
+            logicStore.authenticate(state.identityHash);
         }
-        this.startHeartbeat();
     }
 
     private onDisconnect() {
         console.log('Native network layer disconnected');
-
 
         if (this.stabilityTimer) {
             clearTimeout(this.stabilityTimer);
             this.stabilityTimer = null;
         }
 
+        const wasAuthenticated = this.isAuthenticated;
         this.isConnected = false;
         this.isAuthenticated = false;
-        this.stopHeartbeat();
 
-        if (this.userStoreModule) {
-            this.userStoreModule.userStore.update((s: any) => ({
+        userStore.update((s: any) => {
+            const newState = {
                 ...s,
                 isConnected: false,
                 connectionStatus: 'disconnected'
-            }));
-        }
+            };
+            if (!wasAuthenticated && s.sessionToken) {
+                console.warn("[Network] Disconnected while unauthenticated. Clearing session token for fallback.");
+                newState.sessionToken = null;
+            }
+            return newState;
+        });
+
         this.retry();
     }
 
@@ -121,36 +115,6 @@ export class NetworkLayer {
         if (this.retryCount < this.maxRetries) {
             this.retryCount++;
             setTimeout(() => this.connect(), 2000 * this.retryCount);
-        }
-    }
-
-    private startHeartbeat() {
-        this.stopHeartbeat();
-
-
-        this.heartbeatInterval = setInterval(() => {
-            if (!this.isConnected) return;
-
-
-            if (this.messageQueue.length > 0) {
-                const item = this.messageQueue.shift();
-                if (item) {
-                    if (item.type === 'json') {
-                        this.executeSendJSON(item.data);
-                    } else if (item.type === 'binary' && item.recipient) {
-                        this.executeSendBinary(item.recipient, item.data);
-                    }
-                }
-            } else {
-                this.executeSendJSON({ type: 'dummy', ts: Date.now() });
-            }
-        }, 500);
-    }
-
-    private stopHeartbeat() {
-        if (this.heartbeatInterval) {
-            clearInterval(this.heartbeatInterval);
-            this.heartbeatInterval = null;
         }
     }
 
@@ -165,86 +129,75 @@ export class NetworkLayer {
     }
 
     private async handleBinaryMessage(payload: Uint8Array) {
-        if (this.logicStoreModule) {
-            await this.logicStoreModule.handleIncomingMessage(payload);
-        }
+        await logicStore.handleIncomingMessage(payload);
     }
 
     private async onJsonMessage(msg: any) {
+        this.lastActivity = Date.now();
+        console.debug("[Network] Received JSON:", msg.type, msg);
         if (msg.type === 'auth_success') {
             const token = msg.session_token;
             const id = msg.identity_hash;
             console.log("Authenticated as:", id);
             this.isAuthenticated = true;
 
-            if (this.userStoreModule) {
-                this.userStoreModule.userStore.update((s: any) => ({
-                    ...s,
-                    sessionToken: token || s.sessionToken,
-                    connectionStatus: token ? 'connected' : s.connectionStatus,
-                    keysMissing: !!msg.keys_missing
-                }));
-            }
+            userStore.update((s: any) => ({
+                ...s,
+                sessionToken: token || s.sessionToken,
+                connectionStatus: 'connected'
+            }));
+
+            // Once authenticated, flush any messages waiting in the persistent outbox
+            invoke('flush_outbox').catch(e => console.error("[Network] Flush failed:", e));
+
+            const state = get(userStore) as any;
+            Object.keys(state.chats).forEach(peerHash => {
+                if (!state.chats[peerHash].isGroup) {
+                    logicStore.setOnlineStatus(peerHash, true);
+                    logicStore.broadcastProfile(peerHash);
+                }
+            });
             return;
         }
 
         if (msg.type === 'error') {
             console.error("Server error:", msg.message);
+            if (msg.code === 'auth_failed') {
+                console.warn("Authentication failed. Clearing session token.");
+                userStore.update((s: any) => ({ ...s, sessionToken: null }));
+            }
             return;
         }
 
         if (msg.type === 'ping') {
-            this.executeSendJSON({ type: 'pong' });
+            this.sendJSON({ type: 'pong' });
             return;
         }
 
         if (msg.type === 'queued_message') {
-            if (this.logicStoreModule) await this.logicStoreModule.handleIncomingMessage(msg.payload);
+            await logicStore.handleIncomingMessage(msg.payload);
             return;
         }
 
-        if (this.logicStoreModule) await this.logicStoreModule.handleIncomingMessage(msg);
-    }
-
-    private flushQueue() {
-        let sentCount = 0;
-        while (this.messageQueue.length > 0 && sentCount < 10) {
-            const item = this.messageQueue.shift();
-            if (item) {
-                if (item.type === 'json') {
-                    this.executeSendJSON(item.data);
-                } else if (item.type === 'binary' && item.recipient) {
-                    this.executeSendBinary(item.recipient, item.data);
-                }
-            }
-            sentCount++;
-        }
+        await logicStore.handleIncomingMessage(msg);
     }
 
     sendJSON(data: any) {
-        if (data.type === 'auth' || data.type === 'ping') {
-            this.executeSendJSON(data);
-            return;
-        }
-        this.messageQueue.push({ type: 'json', data });
-    }
-
-    private async executeSendJSON(data: any) {
-        if (!this.isConnected) return;
         try {
-            await invoke('send_to_network', { msg: JSON.stringify(data), isBinary: false });
+            let msg = JSON.stringify(data);
+            invoke('send_to_network', { msg, isBinary: false, metadata: data }).catch(e => {
+                if (e.toString().includes("queued")) {
+                    console.debug("[Network] Message queued in persistent outbox");
+                } else {
+                    console.warn("[Network] Background send failed:", e);
+                }
+            });
         } catch (e) {
             console.error("Native sendJSON failed", e);
         }
     }
 
-    sendBinary(recipientHash: string, data: Uint8Array) {
-        this.messageQueue.push({ type: 'binary', data, recipient: recipientHash });
-    }
-
-    private async executeSendBinary(recipientHash: string, data: Uint8Array) {
-        if (!this.isConnected) return;
-
+    sendBinary(recipientHash: string, data: Uint8Array, metadata?: any) {
         const routingHash = recipientHash.split('.')[0];
         const encoder = new TextEncoder();
         const hashBytes = encoder.encode(routingHash);
@@ -254,11 +207,16 @@ export class NetworkLayer {
         packet.set(hashBytes, 0);
         packet.set(data, 64);
 
-
         const hex = Array.from(packet).map(b => b.toString(16).padStart(2, '0')).join('');
 
         try {
-            await invoke('send_to_network', { msg: hex, isBinary: true });
+            invoke('send_to_network', { msg: hex, isBinary: true, metadata }).catch(e => {
+                if (e.toString().includes("queued")) {
+                    console.debug("[Network] Binary queued in persistent outbox");
+                } else {
+                    console.warn("[Network] Binary background send failed:", e);
+                }
+            });
         } catch (e) {
             console.error("Native sendBinary failed", e);
         }
@@ -284,9 +242,9 @@ export class NetworkLayer {
     }
 
     disconnect() {
-        this.stopHeartbeat();
         this.isConnected = false;
         this.isAuthenticated = false;
+        userStore.update(s => ({ ...s, isConnected: false, connectionStatus: 'disconnected' }));
     }
 }
 

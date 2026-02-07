@@ -9,11 +9,18 @@
     let loading = $state(false);
     let error = $state(false);
 
+    import VoiceNotePlayer from './VoiceNotePlayer.svelte';
     import { signalManager } from '../lib/signal_manager';
     import { toHex } from '../lib/crypto';
+    import { invoke } from '@tauri-apps/api/core';
+    import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
     async function loadAttachment() {
+        if (!msg.attachment) return;
+        console.debug("[Attachment] Loading:", msg.id, msg.attachment.fileName);
+        
         if (msg.attachment.data) {
+            console.debug("[Attachment] Data already present in message object.");
             blobUrl = URL.createObjectURL(new Blob([msg.attachment.data], {type: msg.attachment.fileType}));
             return;
         }
@@ -22,44 +29,96 @@
         try {
             const data = await attachmentStore.get(msg.id);
             if (data) {
+                console.debug("[Attachment] Retrieved from store. Size:", data.length);
                 if (msg.attachment.isV2 && msg.attachment.bundle) {
-                    
-                    const hexData = toHex(data);
-                    const decrypted = await signalManager.decryptMedia(hexData, msg.attachment.bundle);
+                    console.debug("[Attachment] Decrypting V2 media...");
+                    const decrypted = await signalManager.decryptMedia(data, msg.attachment.bundle);
                     blobUrl = URL.createObjectURL(new Blob([decrypted as any], {type: msg.attachment.fileType}));
+                    console.debug("[Attachment] Created blob URL:", blobUrl);
                 } else {
                     blobUrl = URL.createObjectURL(new Blob([data as any], {type: msg.attachment.fileType}));
+                    console.debug("[Attachment] Created legacy blob URL:", blobUrl);
                 }
             } else {
+                console.warn("[Attachment] Not found in attachmentStore:", msg.id);
                 error = true;
             }
         } catch (e) {
-            console.error("Attachment load error:", e);
+            console.error("[Attachment] Load error:", e);
             error = true;
         } finally {
             loading = false;
         }
     }
 
+    async function manualDownload() {
+        console.debug("[Attachment] Manual download requested for:", msg.attachment.fileName);
+        try {
+            // First check if it's already in the message object (V1)
+            let bytes: Uint8Array | null = null;
+            if (msg.attachment.data) {
+                bytes = msg.attachment.data;
+            } else {
+                const data = await attachmentStore.get(msg.id);
+                if (data) {
+                    if (msg.attachment.isV2 && msg.attachment.bundle) {
+                        bytes = await signalManager.decryptMedia(data, msg.attachment.bundle);
+                    } else {
+                        bytes = data;
+                    }
+                }
+            }
+
+            if (!bytes) throw new Error("File data not found");
+
+            console.debug("[Attachment] Saving file via native bridge...");
+            await invoke('save_file', { 
+                data: Array.from(bytes),
+                filename: msg.attachment.fileName || 'download' 
+            });
+
+            // Notify user
+            let hasPermission = await isPermissionGranted();
+            if (!hasPermission) {
+                const permission = await requestPermission();
+                hasPermission = permission === 'granted';
+            }
+            if (hasPermission) {
+                sendNotification({ 
+                    title: 'Download Complete', 
+                    body: `Saved ${msg.attachment.fileName} to Downloads` 
+                });
+            }
+        } catch (e: any) {
+            console.error("[Attachment] Native save failed:", e);
+        }
+    }
+
     $effect(() => {
         loadAttachment();
         return () => {
-            if (blobUrl) URL.revokeObjectURL(blobUrl);
+            if (blobUrl) {
+                console.debug("[Attachment] Revoking blob URL:", blobUrl);
+                URL.revokeObjectURL(blobUrl);
+            }
         };
     });
 </script>
 
 {#if msg.type === 'voice_note'}
-    <div class="flex items-center space-x-2 py-1 min-w-[200px]">
-        <LucideMic size={16} class="text-blue-500" />
-        {#if blobUrl}
-            <audio controls class="h-8 w-48 scale-90 -ml-4" src={blobUrl}></audio>
-        {:else if loading}
+    {#if blobUrl}
+        <VoiceNotePlayer src={blobUrl} id={msg.id} isMine={msg.isMine} />
+    {:else if loading}
+        <div class="flex items-center space-x-2 py-2 px-4 bg-black/5 rounded-2xl">
             <LucideLoader size={16} class="animate-spin text-gray-400" />
-        {:else}
-            <span class="text-xs text-red-400">Error loading audio</span>
-        {/if}
-    </div>
+            <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Loading Voice Note...</span>
+        </div>
+    {:else}
+        <div class="flex items-center space-x-2 py-2 px-4 bg-red-50 rounded-2xl">
+            <LucideMic size={16} class="text-red-400" />
+            <span class="text-[10px] font-bold text-red-400 uppercase tracking-widest">Error loading audio</span>
+        </div>
+    {/if}
 {:else if msg.type === 'file'}
     <div class="flex flex-col space-y-2">
         {#if msg.attachment.fileType?.startsWith('image/') && blobUrl}
@@ -70,40 +129,43 @@
                     class="max-h-64 object-contain mx-auto"
                 />
                 <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                    <a 
-                        href={blobUrl} 
-                        download={msg.attachment.fileName}
+                    <button 
+                        onclick={manualDownload}
                         class="p-2 bg-white rounded-full text-black hover:scale-110 transition shadow-lg"
                         title="Download Image"
                     >
                         <LucideDownload size={20} />
-                    </a>
+                    </button>
                 </div>
             </div>
         {/if}
 
-        <div class="flex items-center space-x-2 bg-black/5 p-2 rounded border border-black/10">
-            <LucidePaperclip size={18} class="text-gray-600" />
+        <div class="flex items-center space-x-3 bg-white/40 backdrop-blur-sm p-3 rounded-2xl border border-black/5 shadow-sm group/file hover:bg-white/60 transition-colors">
+            <div class="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-600 shrink-0">
+                <LucidePaperclip size={20} />
+            </div>
             <div class="flex-1 min-w-0">
-                <div class="text-xs font-medium truncate">{msg.attachment.fileName}</div>
-                <div class="text-[10px] text-gray-500">
+                <div class="text-[11px] font-black truncate text-gray-800 uppercase tracking-tight">{msg.attachment.fileName}</div>
+                <div class="text-[9px] font-bold text-gray-400 uppercase tracking-widest">
                     {(msg.attachment.size || 0) / 1024 > 1024 
                         ? ((msg.attachment.size || 0)/1024/1024).toFixed(1) + ' MB' 
                         : ((msg.attachment.size || 0)/1024).toFixed(1) + ' KB'}
                 </div>
             </div>
             {#if blobUrl}
-                <a 
-                    href={blobUrl} 
-                    download={msg.attachment.fileName}
-                    class="text-blue-600 hover:text-blue-700 font-bold text-xs"
+                <button 
+                    onclick={manualDownload}
+                    class="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center hover:bg-blue-700 transition shadow-md active:scale-95"
+                    title="Download File"
                 >
-                    DL
-                </a>
+                    <LucideDownload size={14} />
+                </button>
             {:else if loading}
-                <LucideLoader size={16} class="animate-spin text-gray-400" />
+                <div class="w-8 h-8 flex items-center justify-center">
+                    <LucideLoader size={16} class="animate-spin text-blue-500" />
+                </div>
             {:else}
-                <button onclick={loadAttachment} class="text-xs text-blue-500 underline">Retry</button>
+                <button onclick={loadAttachment} class="w-8 h-8 rounded-lg bg-red-50 text-red-500 flex items-center justify-center hover:bg-red-100 italic transition font-black text-[9px]">!</button>
             {/if}
         </div>
     </div>

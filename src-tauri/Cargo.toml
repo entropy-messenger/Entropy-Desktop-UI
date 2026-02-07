@@ -1,3 +1,4 @@
+
 [package]
 name = "entropy"
 version = "0.1.0"
@@ -16,26 +17,17 @@ keyring = "3"
 tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
-rusqlite = { version = "0.33.0", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.33.0", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 url = "2"
 hex = "0.4"
-ring = "0.17"
-pbkdf2 = "0.12"
-aes-gcm = "0.10"
 sha2 = "0.10"
-rand = "0.8"
-hmac = "0.12"
 base64 = "0.22"
-hkdf = "0.12"
-ed25519-dalek = "1.0"
-x25519-dalek = "1.1"
-curve25519-dalek = "3"
 tokio-socks = "0.5"
-pqcrypto-kyber = "0.8"
-pqcrypto-traits = "0.3"
+cpal = "0.17.1"
+hound = "3.5.1"
 
 [features]
 default = ["custom-protocol"]

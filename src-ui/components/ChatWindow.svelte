@@ -7,20 +7,22 @@
     setDisappearingTimer, setReplyingTo,
     bulkDelete, bulkStar, toggleBlock, toggleVerification 
   } from '../lib/store';
-  import { callManager } from '../lib/call_manager';
   import { signalManager } from '../lib/signal_manager';
   import { 
     LucideSend, LucideMoreVertical, LucideMic, LucidePaperclip, 
-    LucidePhone, LucideVideo, LucideX, LucideSearch, 
-    LucidePhoneIncoming, LucidePhoneOutgoing, LucidePhoneMissed,
+    LucideX, LucideSearch, 
     LucideCheck, LucideCheckCheck, LucideEdit2, LucideUsers,
     LucideStar, LucideReply, LucideClock, LucideBellOff, LucideTrash2,
     LucideExternalLink, LucideImage, LucideLink, LucideFile, LucideInfo,
     LucideCopy, LucideCheck as LucideCheckIcon, LucideShare2, LucideBan,
-    LucideShieldCheck, LucideShieldAlert
+    LucideShieldCheck, LucideShieldAlert, LucideSquare, LucideTrash
   } from 'lucide-svelte';
   import AttachmentRenderer from './AttachmentRenderer.svelte';
+  import VoiceNotePlayer from './VoiceNotePlayer.svelte';
   import { onMount, tick } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { playingVoiceNoteId } from '../lib/stores/audio';
   
   let messageInput = $state("");
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -30,30 +32,28 @@
   let showOptions = $state(false);
   let showGallery = $state(false);
 
-  
   let selectionMode = $state(false);
   let selectedIds = $state<string[]>([]);
-
   
   let isRecording = $state(false);
-  let mediaRecorder = $state<MediaRecorder | null>(null);
-  let audioChunks = $state<Blob[]>([]);
+  let recordedBlob = $state<Blob | null>(null);
+  let previewUrl = $state<string | null>(null);
+  let recordingSeconds = $state(0);
+  let recordingInterval: any = null;
+  let messageInputEl = $state<HTMLTextAreaElement | null>(null);
+  let visualizerCanvas = $state<HTMLCanvasElement | null>(null);
+  let volumeUnlisten: (() => void) | null = null;
+  let currentVolume = $state(0);
 
-  let activeChat = $derived($userStore.activeChatHash ? $userStore.chats[$userStore.activeChatHash] : null);
-  let replyingTo = $derived($userStore.replyingTo);
-
-  let safetyNumber = $state("");
-  
   $effect(() => {
-    if (showGallery && activeChat && !activeChat.isGroup) {
-      signalManager.getSafetyNumber(activeChat.peerHash, 'http://localhost:8080')
-          .then(sn => safetyNumber = sn)
-          .catch(e => safetyNumber = "Session not established");
-    } else {
-      safetyNumber = "";
+    if (messageInput !== undefined && messageInputEl) {
+        messageInputEl.style.height = 'auto';
+        messageInputEl.style.height = Math.min(messageInputEl.scrollHeight, 200) + 'px';
     }
   });
 
+  let activeChat = $derived($userStore.activeChatHash ? $userStore.chats[$userStore.activeChatHash] : null);
+  let replyingTo = $derived($userStore.replyingTo);
   
   const scrollToBottom = async () => {
       await tick();
@@ -68,8 +68,11 @@
 
   const handleSend = () => {
     if (!messageInput.trim() || !activeChat) return;
-    sendMessage(activeChat.peerHash, messageInput);
+    const dest = activeChat.peerHash;
+    sendMessage(dest, messageInput);
     messageInput = "";
+    isLocallyTyping = false;
+    sendTypingStatus(dest, false).catch(() => {});
   };
   
   const handleKeydown = (e: KeyboardEvent) => {
@@ -84,29 +87,102 @@
     if (files && files.length > 0 && activeChat) sendFile(activeChat.peerHash, files[0]);
   };
 
-  const toggleRecording = async () => {
-    if (isRecording) {
-        mediaRecorder?.stop();
-        isRecording = false;
-    } else {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
-            audioChunks = [];
-            mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
-            mediaRecorder.onstop = () => {
-                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                if (activeChat) sendVoiceNote(activeChat.peerHash, audioBlob);
-                stream.getTracks().forEach(track => track.stop());
-            };
-            mediaRecorder.start();
-            isRecording = true;
-        } catch (e) { console.error(e); }
+  const startRecording = async () => {
+    try {
+        await invoke('start_native_recording');
+        
+        isRecording = true;
+        recordingSeconds = 0;
+        recordedBlob = null;
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        previewUrl = null;
+
+        // Setup Visualizer listener
+        if (volumeUnlisten) volumeUnlisten();
+        volumeUnlisten = await listen<number>('recording-volume', (event) => {
+            currentVolume = event.payload;
+            drawNativeWaveform();
+        });
+
+        recordingInterval = setInterval(() => { recordingSeconds++; }, 1000);
+    } catch (e: any) { 
+        console.error("Recording error:", e); 
+        alert("Microphone error: " + e);
     }
   };
 
-  const initiateCall = (type: 'voice' | 'video') => {
-      if (activeChat && !activeChat.isGroup) callManager.startCall(activeChat.peerHash, type);
+  const drawNativeWaveform = () => {
+      if (!visualizerCanvas) return;
+      const ctx = visualizerCanvas.getContext('2d');
+      if (!ctx) return;
+      
+      const width = visualizerCanvas.width;
+      const height = visualizerCanvas.height;
+      // Fade out effect
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+      ctx.fillRect(0, 0, width, height);
+      
+      const bars = 40;
+      const barWidth = width / bars;
+      // Shift canvas to the left
+      const imageData = ctx.getImageData(barWidth, 0, width - barWidth, height);
+      ctx.putImageData(imageData, 0, 0);
+      ctx.clearRect(width - barWidth, 0, barWidth, height);
+
+      // Draw new bar at the end
+      const barHeight = Math.max(2, currentVolume * height * 4);
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.roundRect(width - barWidth + 1, (height - barHeight) / 2, barWidth - 2, barHeight, 1);
+      ctx.fill();
+  };
+
+  const stopRecording = async () => {
+      if (isRecording) {
+          try {
+              const bytes = await invoke<number[]>('stop_native_recording');
+              recordedBlob = new Blob([new Uint8Array(bytes)], { type: 'audio/wav' });
+              previewUrl = URL.createObjectURL(recordedBlob);
+              
+              isRecording = false;
+              if (recordingInterval) clearInterval(recordingInterval);
+              if (volumeUnlisten) {
+                  volumeUnlisten();
+                  volumeUnlisten = null;
+              }
+          } catch (e) {
+              console.error("Stop recording error:", e);
+          }
+      }
+  };
+
+  const cancelRecording = async () => {
+      if (isRecording) {
+          await invoke('stop_native_recording');
+      }
+      isRecording = false;
+      if (recordingInterval) clearInterval(recordingInterval);
+      if (volumeUnlisten) {
+          volumeUnlisten();
+          volumeUnlisten = null;
+      }
+      recordedBlob = null;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = null;
+      recordingSeconds = 0;
+  };
+
+  const sendRecordedVoiceNote = () => {
+      if (recordedBlob && activeChat) {
+          sendVoiceNote(activeChat.peerHash, recordedBlob);
+          cancelRecording();
+      }
+  };
+
+  const formatRecordingTime = (s: number) => {
+      const mins = Math.floor(s / 60);
+      const secs = s % 60;
+      return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   const setDisappearing = () => {
@@ -125,7 +201,6 @@
       const el = document.getElementById(`msg-${id}`);
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
-
   
   const toggleSelect = (id: string) => {
       if (!selectionMode) { selectionMode = true; selectedIds = [id]; return; }
@@ -145,7 +220,6 @@
         bulkDelete(activeChat.peerHash, selectedIds); cancelSelection(); 
     } 
   };
-
   
   let mediaMessages = $derived(activeChat ? activeChat.messages.filter((m: any) => m.type === 'file' || m.type === 'voice_note') : []);
   let linkMessages = $derived(activeChat ? activeChat.messages.filter((m: any) => m.linkPreview) : []);
@@ -160,21 +234,51 @@
   };
   
   let typingTimeout: any;
-  let isLocallyTyping = $state(false);
+  let isLocallyTyping = false;
+  let lastTypingSent = 0;
+  let lastTypingPeer: string | null = null;
 
   $effect(() => {
-      if (messageInput.length > 0 && !isLocallyTyping && activeChat && !activeChat.isGroup) {
-          isLocallyTyping = true;
-          sendTypingStatus(activeChat.peerHash, true).catch(() => {});
+      // Track input and chat changes
+      const currentInput = messageInput;
+      const currentPeer = activeChat?.peerHash;
+      
+      // Handle chat switch
+      if (lastTypingPeer && lastTypingPeer !== currentPeer) {
+          if (isLocallyTyping) {
+              sendTypingStatus(lastTypingPeer, false).catch(() => {});
+              isLocallyTyping = false;
+          }
+      }
+      lastTypingPeer = currentPeer;
+
+      if (currentInput.length > 0 && activeChat && !activeChat.isGroup) {
+          const now = Date.now();
+          // Send if first time or every 4s to keep recipient timer alive
+          if (!isLocallyTyping || (now - lastTypingSent > 4000)) {
+              isLocallyTyping = true;
+              lastTypingSent = now;
+              sendTypingStatus(activeChat.peerHash, true).catch(() => {});
+          }
+      } else if (currentInput.length === 0 && isLocallyTyping && activeChat && !activeChat.isGroup) {
+          isLocallyTyping = false;
+          sendTypingStatus(activeChat.peerHash, false).catch(() => {});
       }
       
       if (typingTimeout) clearTimeout(typingTimeout);
-      typingTimeout = setTimeout(() => {
-          if (isLocallyTyping && activeChat && !activeChat.isGroup) {
-              isLocallyTyping = false;
-              sendTypingStatus(activeChat.peerHash, false).catch(() => {});
-          }
-      }, 3000);
+      if (activeChat && !activeChat.isGroup) {
+          const typingPeer = activeChat.peerHash;
+          typingTimeout = setTimeout(() => {
+              if (isLocallyTyping) {
+                  isLocallyTyping = false;
+                  sendTypingStatus(typingPeer, false).catch(() => {});
+              }
+          }, 2000);
+      }
+
+      return () => {
+          if (typingTimeout) clearTimeout(typingTimeout);
+      };
   });
 </script>
 
@@ -184,14 +288,11 @@
             <img src="/logo.png" alt="logo" class="w-16 h-16 object-contain" />
         </div>
         <h2 class="text-2xl font-black text-gray-900 mb-2 tracking-tighter uppercase">Entropy</h2>
-        <p class="text-gray-500 max-w-sm font-bold text-[10px] leading-relaxed opacity-40 uppercase tracking-widest pl-1">Select a conversation to start messaging.<br>All signals are end-to-end encrypted.</p>
+        <p class="text-gray-500 max-w-sm font-bold text-[10px] leading-relaxed opacity-40 uppercase tracking-widest pl-1">Select a conversation to start messaging.<br>Secure P2P Messaging.</p>
     </div>
 {:else}
     <div class="h-full w-full flex bg-[#efeae2] relative overflow-hidden">
-        
-        
         <div class="flex-1 flex flex-col relative h-full min-w-0">
-            
             <div class="bg-white/95 backdrop-blur-md p-3 px-4 border-b border-gray-200 flex justify-between items-center shadow-sm z-30">
                 <div class="flex items-center space-x-3 overflow-hidden cursor-pointer" onclick={() => showGallery = !showGallery} onkeypress={(e) => e.key === 'Enter' && (showGallery = !showGallery)} role="button" tabindex="0">
                     <div class="w-10 h-10 rounded-xl bg-gradient-to-tr {activeChat.isGroup ? 'from-purple-500 to-indigo-600' : 'from-blue-400 to-blue-600'} shrink-0 flex items-center justify-center text-white font-bold shadow-sm relative overflow-hidden">
@@ -227,10 +328,6 @@
                         </div>
                     {:else}
                         <button onclick={() => showMessageSearch = !showMessageSearch} class="p-2 {showMessageSearch ? 'text-blue-500 bg-blue-50' : 'text-gray-400'} hover:text-blue-500 hover:bg-gray-100 rounded-full transition"><LucideSearch size={20} /></button>
-                        {#if !activeChat.isGroup}
-                            <button onclick={() => initiateCall('voice')} class="p-2 text-gray-400 hover:text-blue-500 hover:bg-gray-100 rounded-full transition"><LucidePhone size={20} /></button>
-                            <button onclick={() => initiateCall('video')} class="p-2 text-gray-400 hover:text-blue-500 hover:bg-gray-100 rounded-full transition"><LucideVideo size={20} /></button>
-                        {/if}
                         <div class="relative">
                             <button onclick={() => showOptions = !showOptions} class="p-2 text-gray-400 hover:text-blue-500 hover:bg-gray-100 rounded-full transition"><LucideMoreVertical size={20} /></button>
                             {#if showOptions}
@@ -251,8 +348,21 @@
                     {/if}
                 </div>
             </div>
-
             
+            {#if $playingVoiceNoteId}
+                <div class="bg-blue-600 text-white p-1.5 px-4 flex items-center justify-between animate-in slide-in-from-top duration-300 z-20">
+                    <div class="flex items-center space-x-2">
+                        <div class="flex space-x-0.5">
+                            <div class="w-1 h-3 bg-white/40 animate-pulse delay-75"></div>
+                            <div class="w-1 h-3 bg-white/40 animate-pulse delay-150"></div>
+                            <div class="w-1 h-3 bg-white/40 animate-pulse delay-300"></div>
+                        </div>
+                        <span class="text-[10px] font-black uppercase tracking-widest">Listening to Voice Note</span>
+                    </div>
+                    <button onclick={() => playingVoiceNoteId.set(null)} class="text-[9px] font-black uppercase tracking-tighter hover:underline bg-white/10 px-2 py-0.5 rounded-md">Stop</button>
+                </div>
+            {/if}
+
             {#if showMessageSearch}
                 <div class="bg-white/95 backdrop-blur-md p-2 px-4 border-b border-gray-200 animate-in slide-in-from-top duration-200 z-20">
                     <div class="relative">
@@ -271,7 +381,6 @@
                     </div>
                 </div>
             {/if}
-
             
             <div bind:this={scrollContainer} class="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar bg-[#f0f2f5]/30">
                 {#if activeChat.disappearingTimer}
@@ -283,26 +392,6 @@
                     </div>
                 {/if}
                 {#each activeChat.messages.filter(m => !messageSearchQuery || m.content.toLowerCase().includes(messageSearchQuery.toLowerCase())) as msg (msg.id)}
-                    {#if msg.type === 'call_log'}
-                        <div id="msg-{msg.id}" class="flex justify-center my-4 animate-in fade-in zoom-in-95 duration-300">
-                            <div class="bg-white/80 backdrop-blur-sm border border-black/5 px-6 py-2 rounded-2xl flex items-center space-x-3 text-[11px] font-black uppercase tracking-tight text-gray-500 shadow-sm ring-1 ring-black/5">
-                                {#if msg.call_status === 'missed'}
-                                    <LucidePhoneMissed size={14} class="text-red-500" />
-                                {:else if msg.isMine}
-                                    <LucidePhoneOutgoing size={14} class="text-blue-500" />
-                                {:else}
-                                    <LucidePhoneIncoming size={14} class="text-green-500" />
-                                {/if}
-                                <span class="flex items-center space-x-1">
-                                    <span>{msg.content}</span>
-                                    {#if msg.call_duration && msg.call_duration > 0}
-                                        <span class="opacity-30">•</span>
-                                        <span class="font-mono">{Math.floor(msg.call_duration/60)}:{String(msg.call_duration%60).padStart(2,'0')}</span>
-                                    {/if}
-                                </span>
-                            </div>
-                        </div>
-                    {:else}
                     <div id="msg-{msg.id}" class="flex {msg.isMine ? 'justify-end' : 'justify-start'} group items-center">
                         {#if selectionMode}
                             <div class="mr-4 order-first">
@@ -315,13 +404,15 @@
                             </div>
                         {/if}
 
-                        <div class="flex flex-col {msg.isMine ? 'items-end' : 'items-start'} max-w-[75%]">
+                        <div class="flex flex-col {msg.isMine ? 'items-end' : 'items-start'} max-w-[65%]">
                             <div 
-                                class="relative rounded-2xl p-2.5 px-4 shadow-sm transition-all duration-200
+                                class="relative rounded-2xl shadow-sm transition-all duration-200 overflow-hidden
+                                    {msg.type === 'voice_note' ? 'p-1.5 px-2' : 'p-2.5 px-4'}
                                     {msg.isMine ? 'bg-[#dcf8c6] text-gray-800 rounded-tr-none' : 'bg-white text-gray-800 rounded-tl-none'}
                                     {msg.isStarred ? 'ring-2 ring-yellow-400/30' : ''}
                                     {selectedIds.includes(msg.id) ? 'opacity-50 scale-95' : ''}
                                 "
+                                style="word-break: break-all;"
                                 ondblclick={() => toggleSelect(msg.id)}
                                 role="button"
                                 tabindex="0"
@@ -340,7 +431,7 @@
                                 {#if (msg.type === 'voice_note' || msg.type === 'file') && msg.attachment}
                                     <AttachmentRenderer {msg} />
                                 {:else}
-                                    <div class="text-[14px] leading-relaxed whitespace-pre-wrap">{msg.content}</div>
+                                    <div class="text-[14px] leading-relaxed whitespace-pre-wrap break-all overflow-hidden">{msg.content}</div>
                                 {/if}
 
                                 {#if msg.linkPreview}
@@ -373,10 +464,8 @@
                             </div>
                         </div>
                     </div>
-                {/if}
             {/each}
             </div>
-
             
             {#if replyingTo}
                 <div class="px-4 py-2 bg-white/95 backdrop-blur-md border-t border-gray-100 flex items-center animate-in slide-in-from-bottom duration-200">
@@ -405,26 +494,54 @@
                     <p class="text-[10px] text-gray-400 max-w-xs text-center leading-relaxed">Blocked contacts cannot call or message you, and you cannot send signals to them.</p>
                 </div>
             {:else}
-                <div class="p-3 bg-[#f0f2f5]/95 backdrop-blur-md flex items-center space-x-2 border-t border-gray-200 z-10">
+                <div class="p-3 bg-[#f0f2f5]/95 backdrop-blur-md flex items-center space-x-2 border-t border-gray-200 z-10 min-h-[64px]">
                     <input type="file" bind:this={fileInput} onchange={onFileSelect} class="hidden" />
-                    <button onclick={() => fileInput?.click()} class="p-3 text-gray-400 hover:bg-gray-200 rounded-full transition"><LucidePaperclip size={24} /></button>
-                    <textarea 
-                        id="message-input"
-                        bind:value={messageInput}
-                        onkeydown={handleKeydown}
-                        rows="1"
-                        class="flex-1 p-3 rounded-2xl border-none focus:ring-1 focus:ring-blue-500 bg-white resize-none"
-                        placeholder="Type a message" 
-                    ></textarea>
-                    {#if !messageInput.trim()}
-                        <button onclick={toggleRecording} class="p-3 {isRecording ? 'bg-red-500 text-white animate-pulse' : 'text-gray-400 hover:bg-gray-100'} rounded-full shadow-sm"><LucideMic size={24} /></button>
+                    
+                    {#if isRecording}
+                        <div class="flex-1 flex items-center justify-between bg-white px-4 py-2 rounded-2xl shadow-inner animate-in slide-in-from-bottom-2 duration-200 h-[48px]">
+                            <div class="flex items-center space-x-3 flex-1 h-full">
+                                <div class="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.5)]"></div>
+                                <span class="text-[11px] font-black text-red-500 uppercase tracking-widest hidden sm:inline">Recording</span>
+                                <span class="text-xs font-mono font-bold text-gray-700 min-w-[32px]">{formatRecordingTime(recordingSeconds)}</span>
+                                <div class="flex-1 h-8 flex items-center px-4">
+                                    <canvas bind:this={visualizerCanvas} width="160" height="32" class="w-full h-full opacity-60"></canvas>
+                                </div>
+                            </div>
+                            <div class="flex items-center space-x-1 pl-2 border-l border-gray-100">
+                                <button onclick={cancelRecording} class="p-2 text-gray-400 hover:text-red-500 transition-colors" title="Discard"><LucideTrash size={20} /></button>
+                                <button onclick={stopRecording} class="p-2.5 bg-red-500 text-white rounded-xl shadow-lg hover:bg-red-600 transition-all active:scale-95" title="Stop & Listen"><LucideSquare size={16} fill="currentColor" /></button>
+                            </div>
+                        </div>
+                    {:else if previewUrl}
+                        <div class="flex-1 flex items-center space-x-3 bg-white px-4 py-2 rounded-2xl shadow-sm animate-in zoom-in-95">
+                            <button onclick={cancelRecording} class="p-2 text-gray-400 hover:text-red-500 transition-colors"><LucideTrash size={20} /></button>
+                            <div class="flex-1">
+                                <VoiceNotePlayer src={previewUrl} id="preview" isMine={true} />
+                            </div>
+                            <button onclick={sendRecordedVoiceNote} class="p-3 bg-blue-600 text-white rounded-full hover:bg-blue-700 shadow-lg active:scale-95 transition-transform">
+                                <LucideSend size={22} />
+                            </button>
+                        </div>
                     {:else}
-                        <button onclick={handleSend} class="p-3 bg-blue-600 text-white rounded-full hover:bg-blue-700 shadow-lg active:scale-95 transition-transform"><LucideSend size={24} /></button>
+                        <button onclick={() => fileInput?.click()} class="p-3 text-gray-400 hover:bg-gray-200 rounded-full transition"><LucidePaperclip size={24} /></button>
+                        <textarea 
+                            id="message-input"
+                            bind:this={messageInputEl}
+                            bind:value={messageInput}
+                            onkeydown={handleKeydown}
+                            rows="1"
+                            class="flex-1 p-3 rounded-2xl border-none focus:ring-1 focus:ring-blue-500 bg-white resize-none max-h-[200px] overflow-y-auto custom-scrollbar"
+                            placeholder="Type a message" 
+                        ></textarea>
+                        {#if !messageInput.trim()}
+                            <button onclick={startRecording} class="p-3 text-gray-400 hover:bg-gray-100 rounded-full shadow-sm"><LucideMic size={24} /></button>
+                        {:else}
+                            <button onclick={handleSend} class="p-3 bg-blue-600 text-white rounded-full hover:bg-blue-700 shadow-lg active:scale-95 transition-transform"><LucideSend size={24} /></button>
+                        {/if}
                     {/if}
                 </div>
             {/if}
         </div>
-
         
         {#if showGallery}
             <div class="w-80 bg-white border-l border-gray-200 flex flex-col animate-in slide-in-from-right duration-300 z-[40]">
@@ -434,7 +551,6 @@
                 </div>
                 
                 <div class="p-6 flex-1 overflow-y-auto custom-scrollbar space-y-8">
-                    
                     <div class="flex flex-col items-center space-y-4">
                         <div class="w-24 h-24 rounded-3xl bg-gradient-to-tr {activeChat.isGroup ? 'from-purple-500 to-indigo-600' : 'from-blue-400 to-blue-600'} flex items-center justify-center text-white text-3xl font-bold shadow-xl">
                             {#if activeChat.pfp}<img src={activeChat.pfp} alt="" class="w-full h-full object-cover rounded-3xl" />{:else}{(activeChat.localNickname || activeChat.peerAlias || '?')[0].toUpperCase()}{/if}
@@ -447,66 +563,6 @@
                             <p class="text-[10px] font-mono text-gray-400 break-all">{activeChat.peerHash}</p>
                         </div>
                     </div>
-
-                    
-                    {#if !activeChat.isGroup}
-                        <div class="bg-blue-50 p-4 rounded-2xl border border-blue-100 space-y-3">
-                            <div class="flex items-center justify-between">
-                                <h4 class="text-[10px] font-black text-blue-800 uppercase tracking-widest">Safety Number</h4>
-                                <LucideShieldCheck size={14} class="text-blue-500" />
-                            </div>
-                            <div class="bg-white/80 p-3 rounded-xl border border-blue-200 shadow-inner">
-                                <div class="grid grid-cols-3 gap-2 text-center">
-                                    {#if safetyNumber}
-                                        {#each safetyNumber.split(' ') as chunk}
-                                            <span class="text-xs font-mono font-bold text-blue-900">{chunk}</span>
-                                        {/each}
-                                    {:else}
-                                        <span class="col-span-3 text-[10px] text-gray-400 flex items-center justify-center space-x-2">
-                                            <div class="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
-                                            <span>Calculating...</span>
-                                        </span>
-                                    {/if}
-                                </div>
-                            </div>
-                            <p class="text-[9px] text-blue-700 leading-snug">
-                                To verify the security of your end-to-end encryption with <b>{activeChat.localNickname || activeChat.peerAlias || 'this contact'}</b>, compare these numbers with their device. 
-                            </p>
-                            
-                            <div class="flex flex-col space-y-2 pt-2">
-                                <button 
-                                    onclick={() => {
-                                        if (safetyNumber && !safetyNumber.includes(" ")) {
-                                            alert("Security session not fully established yet. Send a message first!");
-                                            return;
-                                        }
-                                        navigator.clipboard.writeText(safetyNumber);
-                                        const original = safetyNumber;
-                                        safetyNumber = "COPIED TO CLIPBOARD";
-                                        setTimeout(() => safetyNumber = original, 2000);
-                                    }}
-                                    class="w-full py-2 bg-white text-blue-600 border border-blue-200 rounded-lg text-xs font-bold hover:bg-blue-50 transition flex items-center justify-center space-x-2 shadow-sm"
-                                >
-                                    <LucideCopy size={13} />
-                                    <span>{safetyNumber === "COPIED TO CLIPBOARD" ? "Copied!" : "Copy for Verification"}</span>
-                                </button>
-
-                                <button 
-                                    onclick={() => toggleVerification(activeChat.peerHash)}
-                                    class="w-full py-2 {activeChat.isVerified ? 'bg-green-600 text-white border-green-700' : 'bg-white text-gray-600 border-gray-200'} border rounded-lg text-xs font-bold hover:opacity-90 transition flex items-center justify-center space-x-2 shadow-sm"
-                                >
-                                    {#if activeChat.isVerified}
-                                        <LucideShieldCheck size={13} />
-                                        <span>Marked as Verified</span>
-                                    {:else}
-                                        <LucideShieldAlert size={13} />
-                                        <span>Mark as Verified</span>
-                                    {/if}
-                                </button>
-                            </div>
-                        </div>
-                    {/if}
-
                     
                     {#if activeChat.isGroup}
                         <div class="space-y-2">
@@ -520,7 +576,6 @@
                         </div>
                     {/if}
 
-                    
                     <div class="space-y-4">
                         <div class="flex justify-between items-center">
                             <h4 class="text-xs font-bold text-gray-400 uppercase tracking-widest">Shared Media ({mediaMessages.length})</h4>
@@ -540,7 +595,6 @@
                         {/if}
                     </div>
 
-                    
                     <div class="space-y-4">
                         <div class="flex justify-between items-center">
                             <h4 class="text-xs font-bold text-gray-400 uppercase tracking-widest">Shared Links ({linkMessages.length})</h4>

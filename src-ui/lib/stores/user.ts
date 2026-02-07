@@ -16,7 +16,6 @@ export interface AppState {
     sessionToken: string | null;
     connectionStatus: 'disconnected' | 'connecting' | 'mining' | 'connected';
     authError: string | null;
-    keysMissing: boolean;
     relayUrl: string;
 }
 
@@ -35,13 +34,11 @@ const initialState: AppState = {
         lastSeen: 'everyone',
         profilePhoto: 'everyone',
         routingMode: 'direct',
-        proxyUrl: 'socks5://127.0.0.1:9050',
-        decoyMode: true
+        proxyUrl: 'socks5://127.0.0.1:9050'
     },
     sessionToken: null,
     connectionStatus: 'disconnected',
     authError: null,
-    keysMissing: false,
     relayUrl: import.meta.env.VITE_RELAY_URL || 'http://localhost:8080'
 };
 

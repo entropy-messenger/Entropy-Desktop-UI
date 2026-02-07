@@ -1,44 +1,66 @@
 import { invoke } from '@tauri-apps/api/core';
-import _sodium from 'libsodium-wrappers';
 
-let sodium: typeof _sodium;
+// Removed sodium dependency as we are no longer doing complex crypto in frontend
 
 export const initCrypto = async () => {
-    await _sodium.ready;
-    sodium = _sodium;
+    // No-op now
 };
 
+// Removed encryption/decryption keys
 
+const HEX_TABLE = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 
-export const deriveVaultKey = async (password: string, salt: string): Promise<Uint8Array> => {
-    return await invoke('crypto_pbkdf2', { password, salt });
-};
-
-export const encryptWithKey = async (plaintext: string, key: Uint8Array): Promise<string> => {
-    const encoder = new TextEncoder();
-    return await invoke('crypto_encrypt', { key, plaintext: Array.from(encoder.encode(plaintext)) });
-};
-
-export const decryptWithKey = async (hex: string, key: Uint8Array): Promise<string | null> => {
-    try {
-        const decoded: number[] = await invoke('crypto_decrypt', { key, hexData: hex });
-        return new TextDecoder().decode(new Uint8Array(decoded));
-    } catch (e) {
-        return null;
+export const toHex = (bytes: Uint8Array): string => {
+    let res = '';
+    for (let i = 0; i < bytes.length; i++) {
+        res += HEX_TABLE[bytes[i]];
     }
+    return res;
 };
 
-export const encryptBinary = async (data: Uint8Array, key: Uint8Array): Promise<Uint8Array> => {
-    const hex: string = await invoke('crypto_encrypt', { key, plaintext: Array.from(data) });
-    return fromHex(hex);
+export const fromHex = (hex: string): Uint8Array => {
+    const cleanHex = hex.trim();
+    const bytes = new Uint8Array(cleanHex.length / 2);
+    for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(cleanHex.substring(i * 2, i * 2 + 2), 16);
+    }
+    return bytes;
 };
 
-export const decryptBinary = async (combined: Uint8Array, key: Uint8Array): Promise<Uint8Array | null> => {
+export const toBase64 = (bytes: Uint8Array): string => {
+    let binary = '';
+    const len = bytes.byteLength;
+    const CHUNK_SIZE = 0x4000;
+    for (let i = 0; i < len; i += CHUNK_SIZE) {
+        const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+        binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+};
+
+export const fromBase64 = (base64: string): Uint8Array => {
     try {
-        const decoded: number[] = await invoke('crypto_decrypt', { key, hexData: toHex(combined) });
-        return new Uint8Array(decoded);
+        const binString = atob(base64);
+        const len = binString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binString.charCodeAt(i);
+        }
+        return bytes;
     } catch (e) {
-        return null;
+        // Fallback for potentially unpadded or messy base64 from server
+        try {
+            const cleaned = base64.replace(/[\s\n\r]/g, '');
+            const binString = atob(cleaned);
+            const bytes = new Uint8Array(binString.length);
+            for (let i = 0; i < binString.length; i++) {
+                bytes[i] = binString.charCodeAt(i);
+            }
+            return bytes;
+        } catch (e2) {
+            console.error("Base64 decode failed", e2);
+            return new Uint8Array(0);
+        }
     }
 };
 
@@ -50,33 +72,4 @@ export const sha256 = async (input: Uint8Array | string): Promise<string> => {
 export const minePoW = async (seed: string, difficulty: number = 3, context: string = ""): Promise<{ nonce: number, seed: string }> => {
     const result: any = await invoke('crypto_mine_pow', { seed, difficulty, context });
     return { nonce: result.nonce, seed: seed };
-};
-
-
-
-export const toHex = (bytes: Uint8Array): string => {
-    if (!sodium) return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    return sodium.to_hex(bytes);
-};
-
-export const fromHex = (hex: string): Uint8Array => {
-    if (!sodium) return new Uint8Array(hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
-    return sodium.from_hex(hex);
-};
-
-export const toBase64 = (bytes: Uint8Array): string => {
-    if (!sodium) return btoa(String.fromCharCode(...bytes));
-    return sodium.to_base64(bytes);
-};
-
-export const fromBase64 = (base64: string): Uint8Array => {
-    if (!sodium) return Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-    try {
-        return sodium.from_base64(base64);
-    } catch (e) {
-
-
-        const cleaned = base64.replace(/[\s\n\r]/g, '');
-        return Uint8Array.from(atob(cleaned), c => c.charCodeAt(0));
-    }
 };

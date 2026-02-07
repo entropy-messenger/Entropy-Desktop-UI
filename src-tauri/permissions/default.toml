@@ -42,7 +42,15 @@ commands.allow = [
     "protocol_export_vault",
     "protocol_import_vault",
     "protocol_save_vault_to_path",
-    "protocol_read_vault_from_path"
+    "protocol_read_vault_from_path",
+    "vault_exists",
+    "vault_delete",
+    "start_native_recording",
+    "stop_native_recording",
+    "flush_outbox",
+    "save_file",
+    "export_database",
+    "import_database"
 ]
 
 [[set]]

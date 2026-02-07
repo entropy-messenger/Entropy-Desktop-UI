@@ -11,8 +11,70 @@
     LucideCheck, LucideCheckCheck, LucideUsers, LucideX,
     LucideCamera, LucideUser, LucidePin, LucideArchive, LucideBellOff,
     LucideLock, LucideCheckCircle2, LucideBan, LucideEyeOff,
-    LucideShieldAlert, LucideCpu, LucideGlobe, LucideTrash2
+    LucideShieldAlert, LucideCpu, LucideGlobe, LucideTrash2,
+    LucideWifiOff
   } from 'lucide-svelte';
+  import { playingVoiceNoteId } from '../lib/stores/audio';
+  import { invoke } from '@tauri-apps/api/core';
+  import { save, open } from '@tauri-apps/plugin-dialog';
+
+  const exportVault = async () => {
+    // Immediate feedback to confirm click
+    alert("Starting export..."); 
+    console.log("Export button clicked");
+    try {
+        if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+            const path = await save({
+                defaultPath: `entropy_backup_${Date.now()}.db`,
+                filters: [{
+                    name: 'Entropy Database',
+                    extensions: ['db']
+                }]
+            });
+            console.log("Save path selected:", path);
+
+            if (path) {
+                await invoke('export_database', { targetPath: path });
+                alert("Backup exported successfully!");
+            } else {
+                alert("Export cancelled.");
+            }
+        } else {
+            alert("Export not supported in web mode.");
+        }
+    } catch (e) {
+        console.error("Export failed:", e);
+        alert("Export failed: " + e);
+    }
+  };
+
+  const importVault = async () => {
+    console.log("Import button clicked");
+    if (!confirm("WARNING: Importing a backup will OVERWRITE all current data. This cannot be undone. Continue?")) return;
+
+    try {
+        if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+            const path = await open({
+                multiple: false,
+                filters: [{
+                    name: 'Entropy Database',
+                    extensions: ['db']
+                }]
+            });
+
+            if (path) {
+                await invoke('import_database', { srcPath: path });
+                alert("Backup restored! The app will now restart.");
+                window.location.reload();
+            }
+        } else {
+            alert("Import not supported in web mode.");
+        }
+    } catch (e) {
+        console.error("Import failed:", e);
+        alert("Import failed: " + e);
+    }
+  };
 
   let activeHash = $state<string | null>(null);
   let searchQuery = $state("");
@@ -201,6 +263,16 @@
             class="w-full pl-9 pr-4 py-2 bg-gray-100 focus:bg-white border-none rounded-xl text-xs transition ring-1 ring-black/5"
         />
     </div>
+    
+    {#if $playingVoiceNoteId}
+        <div class="px-4 py-2 bg-blue-600 text-white flex items-center justify-between animate-in slide-in-from-left duration-300">
+            <div class="flex items-center space-x-2">
+                <div class="w-2 h-2 bg-white rounded-full animate-pulse"></div>
+                <span class="text-[9px] font-black uppercase tracking-widest">Listening</span>
+            </div>
+            <button onclick={() => playingVoiceNoteId.set(null)} class="text-[8px] font-black uppercase tracking-tighter hover:underline bg-white/10 px-1.5 py-0.5 rounded">Stop</button>
+        </div>
+    {/if}
   </div>
 
   <div class="flex-1 overflow-y-auto custom-scrollbar">
@@ -341,18 +413,20 @@
 
                         <div class="flex space-x-2">
                             <button 
-                                onclick={async () => {
-                                    const { exportVault } = await import('../lib/store');
-                                    await exportVault();
+                                type="button"
+                                onclick={(e) => { 
+                                    console.log("Export clicked (inline)"); 
+                                    exportVault(); 
                                 }}
                                 class="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl text-xs font-bold hover:bg-gray-200 transition"
                             >
                                 Export Backup
                             </button>
                             <button 
-                                onclick={async () => {
-                                    const { importVault } = await import('../lib/store');
-                                    await importVault();
+                                type="button"
+                                onclick={(e) => { 
+                                    console.log("Import clicked (inline)"); 
+                                    importVault(); 
                                 }}
                                 class="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl text-xs font-bold hover:bg-gray-200 transition"
                             >
@@ -547,6 +621,41 @@
         <div class="p-6 border-t border-gray-100"><button onclick={handleCreateGroup} disabled={!groupName || groupMembers.length === 0} class="w-full py-4 bg-blue-600 text-white rounded-2xl font-bold shadow-lg active:scale-[0.98] transition">Create Group Chat</button></div>
     </div>
   {/if}
+
+  <div class="mt-auto border-t border-gray-100 bg-gray-50/50">
+    {#if $userStore.connectionStatus !== 'connected'}
+        <div class="p-3 px-4 flex items-center space-x-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
+            {#if $userStore.connectionStatus === 'mining'}
+                <div class="w-3 h-3 border-2 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+                <div class="flex flex-col min-w-0">
+                    <span class="text-[9px] font-black uppercase text-blue-600 tracking-tighter">Securing Link</span>
+                    <span class="text-[8px] font-bold text-gray-400 truncate tracking-tight">SOLVING PROOF-OF-WORK...</span>
+                </div>
+            {:else if $userStore.connectionStatus === 'connecting'}
+                <div class="w-3 h-3 border-2 border-gray-200 border-t-gray-600 rounded-full animate-spin"></div>
+                <div class="flex flex-col min-w-0">
+                    <span class="text-[9px] font-black uppercase text-gray-600 tracking-tighter">Connecting</span>
+                    <span class="text-[8px] font-bold text-gray-400 truncate tracking-tight">ESTABLISHING RELAY...</span>
+                </div>
+            {:else}
+                <LucideWifiOff size={14} class="text-red-500 animate-pulse" />
+                <div class="flex-1 flex flex-col min-w-0">
+                    <span class="text-[9px] font-black uppercase text-red-500 tracking-tighter">Offline</span>
+                    <span class="text-[8px] font-bold text-red-400/60 truncate tracking-tight">WAITING FOR NETWORK...</span>
+                </div>
+                <button onclick={() => window.location.reload()} class="text-[8px] font-black uppercase text-blue-600 hover:underline">Retry</button>
+            {/if}
+        </div>
+    {:else}
+        <div class="p-2 px-4 flex items-center justify-between opacity-40 hover:opacity-100 transition-opacity">
+            <div class="flex items-center space-x-1.5">
+                <div class="w-1.5 h-1.5 bg-green-500 rounded-full shadow-[0_0_4px_rgba(34,197,94,0.5)]"></div>
+                <span class="text-[8px] font-black uppercase tracking-widest text-gray-400">P2P Network Live</span>
+            </div>
+            <span class="text-[8px] font-mono text-gray-400">Node v1.0.4</span>
+        </div>
+    {/if}
+  </div>
 </div>
 
 <style>

@@ -1,18 +1,4 @@
 
-export interface KeyPair {
-    publicKey: Uint8Array;
-    privateKey: Uint8Array;
-    keyType: 'ed25519' | 'x25519';
-}
-
-export interface UserIdentity {
-    identityKey: KeyPair;
-    ephemeralKey: KeyPair;
-    identityHash: string;
-    publicKeyHex: string;
-    mnemonic?: string;
-}
-
 export interface LinkPreview {
     url: string;
     title?: string;
@@ -27,7 +13,7 @@ export interface Message {
     senderHash: string;
     senderAlias?: string;
     content: string;
-    type: 'text' | 'voice_note' | 'file' | 'call_log' | 'signaling';
+    type: 'text' | 'voice_note' | 'file' | 'signaling';
     attachment?: {
         url?: string;
         fileName?: string;
@@ -35,8 +21,6 @@ export interface Message {
         size?: number;
         data?: Uint8Array;
     };
-    call_duration?: number;
-    call_status?: 'missed' | 'completed' | 'declined';
     groupId?: string;
     isMine: boolean;
     status: 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
@@ -57,7 +41,6 @@ export interface PrivacySettings {
     profilePhoto: 'everyone' | 'nobody';
     routingMode: 'direct' | 'tor' | 'custom';
     proxyUrl?: string;
-    decoyMode: boolean;
 }
 
 export interface Chat {

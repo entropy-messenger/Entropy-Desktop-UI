@@ -17,25 +17,33 @@ export const addMessage = (peerHash: string, msg: Message) => {
             return s;
         }
 
-        s.chats[peerHash].messages.push(msg);
+        const updatedChat = { ...s.chats[peerHash] };
+        updatedChat.messages = [...updatedChat.messages, msg];
 
-        if (!msg.isMine && s.activeChatHash !== peerHash) {
-            s.chats[peerHash].unreadCount = (s.chats[peerHash].unreadCount || 0) + 1;
+        if (!msg.isMine) {
+            if (s.activeChatHash === peerHash) {
+                // If viewing, mark as read and send receipt
+                msg.status = 'read';
+                sendReceipt(peerHash, [msg.id], 'read');
+            } else {
+                updatedChat.unreadCount = (updatedChat.unreadCount || 0) + 1;
 
-            if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
-                import('@tauri-apps/plugin-notification').then(({ sendNotification, isPermissionGranted }) => {
-                    isPermissionGranted().then((granted: boolean) => {
-                        if (granted) {
-                            sendNotification({
-                                title: `Message from ${s.chats[peerHash].peerAlias}`,
-                                body: msg.content.length > 50 ? msg.content.substring(0, 47) + '...' : msg.content
-                            });
-                        }
+                if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+                    import('@tauri-apps/plugin-notification').then(({ sendNotification, isPermissionGranted }) => {
+                        isPermissionGranted().then((granted: boolean) => {
+                            if (granted) {
+                                sendNotification({
+                                    title: `Message from ${updatedChat.peerAlias}`,
+                                    body: msg.content.length > 50 ? msg.content.substring(0, 47) + '...' : msg.content
+                                });
+                            }
+                        });
                     });
-                });
+                }
             }
         }
 
+        s.chats[peerHash] = updatedChat;
         return { ...s, chats: { ...s.chats } };
     });
 };
@@ -66,11 +74,17 @@ export const sendReceipt = async (peerHash: string, msgIds: string[], status: 'd
 
 export const downloadAttachment = async (msgId: string, bundle: any) => {
     try {
+        console.debug("[Download] Starting for msgId:", msgId);
         const encrypted = await attachmentStore.get(msgId);
-        if (!encrypted) throw new Error("Attachment not found locally");
+        if (!encrypted) {
+            console.error("[Download] Attachment not found in store for msgId:", msgId);
+            throw new Error("Attachment not found locally");
+        }
 
-        const decrypted = await signalManager.decryptMedia(toHex(encrypted), bundle);
+        console.debug("[Download] Data retrieved, decrypting...");
+        const decrypted = await signalManager.decryptMedia(encrypted, bundle);
 
+        console.debug("[Download] Creating blob and triggering click...");
         const blob = new Blob([decrypted as any], { type: bundle.file_type || 'application/octet-stream' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -80,7 +94,8 @@ export const downloadAttachment = async (msgId: string, bundle: any) => {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
+        console.debug("[Download] Successfully triggered.");
     } catch (e) {
-        console.error("Download failed:", e);
+        console.error("[Download] Failed:", e);
     }
 };

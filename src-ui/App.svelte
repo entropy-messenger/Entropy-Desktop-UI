@@ -6,17 +6,17 @@
   import { network } from './lib/network';
   import Sidebar from './components/Sidebar.svelte';
   import ChatWindow from './components/ChatWindow.svelte';
-  import CallOverlay from './components/CallOverlay.svelte';
   import TitleBar from './components/TitleBar.svelte';
   import { LucideWifiOff, LucideShieldCheck, LucideLock, LucideFingerprint } from 'lucide-svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
+  import { hasVault } from './lib/secure_storage';
+  import { signalManager } from './lib/signal_manager';
 
   let password = $state("");
   let isInitializing = $state(true);
   let hasExistingIdentity = $state(false);
 
-  import { hasStoredSalt } from './lib/secure_storage';
 
   const checkNotificationPermission = async () => {
     let permission = await isPermissionGranted();
@@ -28,11 +28,11 @@
   onMount(async () => {
     
     if (window.__TAURI_INTERNALS__) {
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, 100)); // Wait for Tauri injection
     }
     
     isInitializing = false;
-    hasExistingIdentity = await hasStoredSalt();
+    hasExistingIdentity = await hasVault();
 
     if (window.__TAURI_INTERNALS__) {
       try {
@@ -94,43 +94,59 @@
         }
     }
 
-    import { signalManager } from './lib/signal_manager';
+    // New Full Vault Export (for backup)
+    async function handleExportVault() {
+         try {
+            if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+                const { save } = await import('@tauri-apps/plugin-dialog');
+                const path = await save({
+                    defaultPath: `entropy_backup_${Date.now()}.db`,
+                    filters: [{
+                        name: 'Entropy Database',
+                        extensions: ['db']
+                    }]
+                });
 
-    async function handleExport() {
-        try {
-            const data = await signalManager.exportIdentity();
-            const blob = new Blob([data as any], { type: 'application/octet-stream' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `entropy_identity_${new Date().toISOString().split('T')[0]}.entropy`;
-            a.click();
-            URL.revokeObjectURL(url);
+                if (path) {
+                    await invoke('export_database', { targetPath: path });
+                    alert("Backup exported successfully!");
+                }
+            } else {
+                alert("Export not supported in web mode.");
+            }
         } catch (e) {
+            console.error("Export failed:", e);
             alert("Export failed: " + e);
         }
     }
 
-    async function handleImport() {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = '.entropy,.json';
-        input.onchange = async (e: any) => {
-            const file = e.target.files[0];
-            const reader = new FileReader();
-            reader.onload = async () => {
-                try {
-                    const data = new Uint8Array(reader.result as ArrayBuffer);
-                    await signalManager.importIdentity(data);
-                    alert("Identity imported! The app will now reload.");
+    // New Full Vault Import (for restore)
+    async function handleImportVault() {
+        if (!confirm("WARNING: Importing a backup will OVERWRITE any current data on this device. Continue?")) return;
+
+        try {
+            if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+                const { open } = await import('@tauri-apps/plugin-dialog');
+                const path = await open({
+                    multiple: false,
+                    filters: [{
+                        name: 'Entropy Database',
+                        extensions: ['db']
+                    }]
+                });
+
+                if (path) {
+                    await invoke('import_database', { srcPath: path });
+                    alert("Backup restored! The app will now reload.");
                     window.location.reload();
-                } catch (err) {
-                    alert("Import failed: " + err);
                 }
-            };
-            reader.readAsArrayBuffer(file);
-        };
-        input.click();
+            } else {
+                alert("Import not supported in web mode.");
+            }
+        } catch (e) {
+            console.error("Import failed:", e);
+            alert("Import failed: " + e);
+        }
     }
 </script>
 
@@ -164,15 +180,15 @@
                         <h1 class="text-4xl font-[900] text-gray-900 tracking-tighter">Entropy</h1>
                         <p class="text-gray-500 text-sm leading-relaxed max-w-[280px] mx-auto font-medium">
                             {hasExistingIdentity 
-                                ? 'Your cryptographic vault is locked. Please enter your master password.' 
-                                : 'Privacy by design, not by policy. Create your first decentralized identity.'}
+                                ? 'Welcome back.' 
+                                : 'Decentralized P2P Messaging. Create your identity.'}
                         </p>
                     </div>
                     
                     <div class="space-y-6 text-left">
                         <div class="space-y-2.5">
                             <div class="flex justify-between items-center px-1">
-                                <label for="vault-password" class="text-[10px] font-black text-gray-400 uppercase tracking-widest pl-1">Master Password</label>
+                                <label for="vault-password" class="text-[10px] font-black text-gray-400 uppercase tracking-widest pl-1">Login</label>
                                 {#if hasExistingIdentity}
                                     <span class="text-[10px] font-bold text-blue-600 uppercase tracking-tight">Identity Found</span>
                                 {/if}
@@ -193,7 +209,7 @@
                                     id="vault-password"
                                     type="password" 
                                     bind:value={password}
-                                    placeholder="••••••••••••" 
+                                    placeholder="Enter password..." 
                                     class="w-full pl-14 pr-6 py-5 bg-gray-50/50 rounded-[1.5rem] border-2 border-transparent focus:border-blue-500/20 focus:bg-white focus:ring-4 focus:ring-blue-500/5 transition-all text-lg font-mono tracking-[0.4em] outline-none {$userStore.authError ? 'border-red-500/20' : ''}"
                                     onkeydown={(e) => e.key === 'Enter' && handleLogin()}
                                 />
@@ -209,10 +225,10 @@
                             >
                                 {#if isInitializing}
                                     <div class="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                                    <span>Unlocking Vault...</span>
+                                    <span>Unlocking...</span>
                                 {:else}
                                     <LucideFingerprint size={20} class="group-hover:scale-110 transition-transform" />
-                                    <span>Unlock Identity</span>
+                                    <span>Enter</span>
                                 {/if}
                             </button>
                         {:else}
@@ -220,36 +236,36 @@
                                 class="w-full py-5 bg-gray-900 text-white rounded-[1.5rem] font-black text-sm uppercase tracking-widest hover:bg-black transition-all shadow-2xl active:scale-[0.98] disabled:opacity-50 flex items-center justify-center space-x-3 overflow-hidden group"
                                 onclick={handleCreate}
                                 disabled={isInitializing || !password}
-                                aria-label="Create Secure Identity"
+                                aria-label="Create Identity"
                             >
                                 {#if isInitializing}
                                     <div class="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                                    <span>Generating Seed...</span>
+                                    <span>Creating...</span>
                                 {:else}
                                     <LucideShieldCheck size={20} class="group-hover:scale-110 transition-transform" />
-                                    <span>Create Secure Identity</span>
+                                    <span>Create Identity</span>
                                 {/if}
                             </button>
                         {/if}
                     </div>
 
                     <div class="pt-2 space-y-4">
-                        <p class="text-[10px] text-gray-400 font-bold uppercase tracking-[0.2em] italic">Zero-Knowledge Architecture</p>
+                        <p class="text-[10px] text-gray-400 font-bold uppercase tracking-[0.2em] italic">Decentralized Architecture</p>
                         
                         <div class="flex items-center justify-center space-x-4 pt-4">
                             {#if hasExistingIdentity}
                                 <button 
-                                    onclick={handleExport}
+                                    onclick={handleExportVault}
                                     class="text-[10px] font-black text-blue-400 uppercase tracking-widest hover:text-blue-600 transition-colors"
                                 >
-                                    Backup Identity
+                                    Backup Vault
                                 </button>
                             {/if}
                             <button 
-                                onclick={handleImport}
+                                onclick={handleImportVault}
                                 class="text-[10px] font-black text-indigo-400 uppercase tracking-widest hover:text-indigo-600 transition-colors"
                             >
-                                Restore Identity
+                                Import Backup
                             </button>
                             {#if import.meta.env.DEV || $userStore.authError}
                                 <button 
@@ -272,45 +288,8 @@
             <div class="flex-1 relative flex flex-col min-w-0">
                 <ChatWindow />
             
-                {#if $userStore.connectionStatus !== 'connected'}
-                    <div class="absolute inset-0 bg-white/60 backdrop-blur-sm z-50 flex items-center justify-center animate-in fade-in duration-500">
-                        <div class="bg-white p-10 rounded-[2.5rem] shadow-[0_40px_100px_-20px_rgba(0,0,0,0.15)] border border-gray-100 flex flex-col items-center space-y-8 max-w-sm text-center relative overflow-hidden">
-                            <div class="absolute top-0 left-0 w-full h-1 bg-gray-100">
-                                <div class="h-full bg-blue-600 animate-progress"></div>
-                            </div>
-                            
-                            {#if $userStore.connectionStatus === 'mining'}
-                                <div class="relative">
-                                    <div class="w-20 h-20 border-4 border-blue-600/10 border-t-blue-600 rounded-full animate-spin"></div>
-                                    <div class="absolute inset-0 flex items-center justify-center text-blue-600">
-                                        <LucideShieldCheck size={32} />
-                                    </div>
-                                </div>
-                                <div class="space-y-2">
-                                    <div class="text-xl font-black text-gray-900 tracking-tight">Securing Network</div>
-                                    <div class="text-[12px] text-gray-500 font-medium leading-relaxed px-4">Establishing a zero-knowledge routing session. Computing proof-of-work to protect from spam...</div>
-                                </div>
-                            {:else if $userStore.connectionStatus === 'connecting'}
-                                <div class="w-20 h-20 border-4 border-gray-100 border-t-indigo-600 rounded-full animate-spin"></div>
-                                <div class="space-y-2">
-                                    <div class="text-xl font-black text-gray-900 tracking-tight">Authenticating</div>
-                                    <div class="text-[12px] text-gray-500 font-medium px-4">Handshaking with Entropy relay nodes...</div>
-                                </div>
-                            {:else}
-                                <div class="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center text-red-500 animate-pulse">
-                                    <LucideWifiOff size={40} />
-                                </div>
-                                <div class="space-y-2">
-                                    <div class="text-xl font-black text-gray-900 tracking-tight">Connection Lost</div>
-                                    <div class="text-[12px] text-gray-500 font-medium px-4">Attempting to re-establish secure link to the decentralized network...</div>
-                                </div>
-                            {/if}
-                        </div>
-                    </div>
-                {/if}
             </div>
         </div>
-        <CallOverlay />
     {/if}
 
 </main>

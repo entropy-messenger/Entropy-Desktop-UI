@@ -1,3 +1,4 @@
+
 import { get } from 'svelte/store';
 import { userStore } from '../stores/user';
 import { signalManager } from '../signal_manager';
@@ -14,22 +15,26 @@ export const markOnline = (peerHash: string) => {
 
     userStore.update(s => {
         if (s.chats[peerHash]) {
-            s.chats[peerHash].isOnline = true;
-            s.chats[peerHash].lastSeen = undefined;
+            const updated = { ...s.chats[peerHash] };
+            updated.isOnline = true;
+            updated.lastSeen = undefined;
+            s.chats[peerHash] = updated;
         }
-        return s;
+        return { ...s, chats: { ...s.chats } };
     });
 
     statusTimeouts[peerHash] = setTimeout(() => {
         userStore.update(s => {
             if (s.chats[peerHash]) {
-                s.chats[peerHash].isOnline = false;
-                s.chats[peerHash].lastSeen = Date.now();
+                const updated = { ...s.chats[peerHash] };
+                updated.isOnline = false;
+                updated.lastSeen = Date.now();
+                s.chats[peerHash] = updated;
             }
-            return s;
+            return { ...s, chats: { ...s.chats } };
         });
         delete statusTimeouts[peerHash];
-    }, 40000);
+    }, 25000);
 };
 
 export const startHeartbeat = () => {
@@ -49,7 +54,7 @@ export const startHeartbeat = () => {
                 return s;
             });
         }
-    }, 30000);
+    }, 12000);
 
     // Disappearing messages cleanup (every 3s)
     setInterval(() => {
@@ -170,6 +175,7 @@ export const registerGlobalNickname = async (nickname: string) => {
         const challengeRes = await fetch(`${serverUrl}/pow/challenge?nickname=${encodeURIComponent(nickname)}&identity_hash=${state.identityHash}`);
         const { seed, difficulty } = await challengeRes.json();
         const { nonce } = await minePoW(seed, difficulty, nickname);
+        // Signature might be expected by backend, but we send stub
         const signature = await signalManager.signMessage(nickname);
 
         const response = await fetch(`${serverUrl}/nickname/register`, {
@@ -182,7 +188,7 @@ export const registerGlobalNickname = async (nickname: string) => {
             body: JSON.stringify({
                 nickname,
                 identity_hash: state.identityHash,
-                identityKey: await signalManager.getPublicIdentityKey(),
+                identityKey: "plaintext_no_key", // Placeholder
                 signature
             })
         });
@@ -203,16 +209,9 @@ export const registerGlobalNickname = async (nickname: string) => {
 };
 
 export const lookupNickname = async (nickname: string): Promise<string | null> => {
-    const useDecoys = get(userStore).privacySettings.decoyMode;
-    let names = [nickname];
-    if (useDecoys) {
-        names = [nickname, "alice", "crypto", "signal", "privacy", "matrix"].sort(() => 0.5 - Math.random()).slice(0, 4);
-        if (!names.includes(nickname)) names[0] = nickname;
-    }
-
     try {
         const serverUrl = get(userStore).relayUrl;
-        const response = await fetch(`${serverUrl}/nickname/lookup?name=${names.map(n => encodeURIComponent(n)).join(',')}`);
+        const response = await fetch(`${serverUrl}/nickname/lookup?name=${encodeURIComponent(nickname)}`);
         if (response.status === 200) {
             const data = await response.json();
             return data[nickname] || data.identity_hash || null;
@@ -224,11 +223,7 @@ export const lookupNickname = async (nickname: string): Promise<string | null> =
 };
 
 export const verifyContact = async (peerHash: string, isVerified: boolean) => {
-    await signalManager.verifySession(peerHash, isVerified);
-    userStore.update(s => {
-        if (s.chats[peerHash]) s.chats[peerHash].isVerified = isVerified;
-        return { ...s };
-    });
+    // Disabled in plaintext
 };
 
 export const startChat = (peerHash: string, alias?: string) => {

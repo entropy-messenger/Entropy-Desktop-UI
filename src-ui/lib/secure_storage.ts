@@ -1,3 +1,4 @@
+
 import { invoke } from '@tauri-apps/api/core';
 
 declare global {
@@ -8,33 +9,16 @@ declare global {
 
 const isTauri = () => typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
 
-
+// Stubbed secure storage interface - no keyring used
 export const secureStore = async (key: string, value: string): Promise<void> => {
-    if (isTauri()) {
-        try {
-            await invoke('store_secret', { key, value });
-        } catch (e) {
-            console.error(`[SecureStorage] Native keyring store failed for ${key}:`, e);
-            throw new Error(`System Keyring failure: ${e}`);
-        }
-    } else {
-        throw new Error("Secure storage requires a native environment.");
-    }
+    // No-op or log warning
+    console.warn("Secure store called in plaintext mode. Ignoring.");
 };
 
 export const secureLoad = async (key: string): Promise<string | null> => {
-    if (isTauri()) {
-        try {
-            const secret = await invoke('get_secret', { key });
-            return secret as string | null;
-        } catch (e) {
-            return null;
-        }
-    } else {
-        return null;
-    }
+    // Return null
+    return null;
 };
-
 
 export const initVault = async (passphrase: string): Promise<void> => {
     if (isTauri()) {
@@ -47,7 +31,7 @@ export const vaultSave = async (key: string, value: string): Promise<void> => {
         try {
             await invoke('vault_save', { key, value });
         } catch (e) {
-            console.error("[SecureStorage] SQLCipher save failed:", e);
+            console.error("[Vault] Save failed:", e);
             throw e;
         }
     } else {
@@ -63,7 +47,7 @@ export const vaultLoad = async (key: string): Promise<string | null> => {
             const val = await invoke('vault_load', { key });
             return val as string | null;
         } catch (e) {
-            console.warn("[SecureStorage] SQLCipher load failed:", e);
+            console.warn("[Vault] Load failed (or empty):", e);
             return null;
         }
     } else {
@@ -74,8 +58,33 @@ export const vaultLoad = async (key: string): Promise<string | null> => {
     }
 };
 
+export const vaultDelete = async (key: string): Promise<void> => {
+    if (isTauri()) {
+        try {
+            await invoke('vault_delete', { key });
+        } catch (e) {
+            console.error("[Vault] Delete failed:", e);
+        }
+    } else {
+        if (import.meta.env.DEV) {
+            localStorage.removeItem(`vlt:${key}`);
+        }
+    }
+};
 
-export const hasStoredSalt = async (): Promise<boolean> => {
-    const salt = await secureLoad('entropy_vault_salt');
-    return salt !== null;
+export const hasVault = async (): Promise<boolean> => {
+    if (isTauri()) {
+        try {
+            // Directly try to open and read. This handles both existence and validity.
+            await invoke('init_vault', { passphrase: "unused" });
+            const id = await invoke('vault_load', { key: "plaintext_identity" });
+            console.debug("[hasVault] Check result:", !!id);
+            return !!id;
+        } catch (e) {
+            console.error("[hasVault] Check failed:", e);
+            return false;
+        }
+    }
+    // Fallback for dev mode without backend
+    return !!localStorage.getItem('plaintext_identity');
 };

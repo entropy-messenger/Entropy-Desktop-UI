@@ -1,8 +1,9 @@
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod app_state;
 mod commands;
-mod protocol;
 #[cfg(test)]
 mod tests;
 
@@ -12,63 +13,48 @@ use tauri::{
     tray::{TrayIconBuilder, TrayIconEvent},
     Manager,
 };
-use app_state::{DbState, NetworkState};
+use app_state::{DbState, NetworkState, AudioState};
+use audio::AudioRecorder;
 
 fn main() {
+    let profile = std::env::var("ENTROPY_PROFILE").unwrap_or_else(|_| "default".to_string());
+    println!("[*] Starting Entropy (Profile: {})", profile);
+
     tauri::Builder::default()
         .manage(DbState {
             conn: Mutex::new(None),
         })
         .manage(NetworkState {
+            queue: Mutex::new(std::collections::VecDeque::new()),
             sender: Mutex::new(None),
+        })
+        .manage(AudioState {
+            recorder: Mutex::new(AudioRecorder::new()),
         })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            commands::store_secret,
-            commands::get_secret,
             commands::init_vault,
             commands::vault_save,
             commands::vault_load,
-            commands::dump_vault,
-            commands::restore_vault,
             commands::crypto_sha256,
-            commands::crypto_pbkdf2,
-            commands::crypto_encrypt,
-            commands::crypto_decrypt,
-            commands::protocol_init,
-            commands::protocol_get_safety_number,
-            commands::protocol_establish_session,
-            commands::protocol_encrypt,
-            commands::protocol_decrypt,
-            commands::protocol_encrypt_media,
-            commands::protocol_decrypt_media,
-            commands::protocol_get_pending,
-            commands::protocol_save_pending,
-            commands::protocol_remove_pending,
-            commands::protocol_replenish_pre_keys,
-            commands::protocol_verify_session,
-            commands::protocol_secure_vacuum,
-            commands::protocol_encrypt_sealed,
-            commands::protocol_decrypt_sealed,
-            commands::protocol_create_group_distribution,
-            commands::protocol_group_init,
-            commands::protocol_group_encrypt,
-            commands::protocol_group_decrypt,
-            commands::protocol_process_group_distribution,
             commands::connect_network,
             commands::send_to_network,
+            commands::flush_outbox,
             commands::nuclear_reset,
             commands::crypto_mine_pow,
             commands::clear_vault,
-            commands::protocol_sign,
-            commands::protocol_export_vault,
-            commands::protocol_import_vault,
-            commands::protocol_save_vault_to_path,
-            commands::protocol_read_vault_from_path
+            commands::vault_exists,
+            commands::vault_delete,
+            commands::start_native_recording,
+            commands::stop_native_recording,
+            commands::save_file,
+            commands::export_database,
+            commands::import_database
         ])
         .setup(|app| {
+            // Setup tray and menu as before
             let quit_i = MenuItem::with_id(app, "quit", "Quit Entropy", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;

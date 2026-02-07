@@ -10,6 +10,8 @@
         "core:webview:default",
         "shell:default",
         "notification:default",
+        "dialog:default",
+        "dialog:allow-message",
         "default",
         "allow-commands"
     ]
