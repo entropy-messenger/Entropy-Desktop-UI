@@ -99,3 +99,16 @@ export const downloadAttachment = async (msgId: string, bundle: any) => {
         console.error("[Download] Failed:", e);
     }
 };
+
+export const markAsDownloaded = (chatId: string, msgId: string) => {
+    userStore.update(s => {
+        const chat = s.chats[chatId];
+        if (chat) {
+            const m = chat.messages.find(x => x.id === msgId);
+            if (m && m.attachment) {
+                m.attachment.isDownloaded = true;
+            }
+        }
+        return { ...s, chats: { ...s.chats } };
+    });
+};

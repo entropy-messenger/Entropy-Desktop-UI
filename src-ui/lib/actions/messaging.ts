@@ -16,9 +16,10 @@ export { addMessage, bulkDelete, deleteMessage, downloadAttachment, sendReceipt 
 export const setReplyingTo = (msg: Message | null) => userStore.update(s => ({ ...s, replyingTo: msg }));
 export const typingTimeouts: Record<string, any> = {};
 
-const CHUNK_SIZE = 32 * 1024; // 32KB chunks
+const MEDIA_CHUNK_SIZE = 100 * 1024; // 100KB chunks
 const fragmentReassembly: Record<string, {
     total: number,
+    received: number,
     chunks: Record<number, Uint8Array>,
     timestamp: number
 }> = {};
@@ -137,16 +138,100 @@ export const sendFile = async (destId: string, file: File) => {
     reader.onload = async () => {
         const buffer = reader.result as ArrayBuffer;
         const uint8 = new Uint8Array(buffer);
-
-        // Uses simplified encryptMedia (returns hex of data)
-        const { ciphertext, bundle } = await signalManager.encryptMedia(uint8, file.name, file.type);
         const msgId = crypto.randomUUID();
 
-        const contentObj = {
-            type: 'file_v2',
+        // Optimistic UI: Add message to store immediately
+        const optMsg: Message = {
             id: msgId,
-            bundle,
-            data: ciphertext,
+            timestamp: Date.now(),
+            senderHash: state.identityHash!,
+            content: `File: ${file.name}`,
+            type: 'file',
+            groupId: chat?.isGroup ? destId : undefined,
+            attachment: { fileName: file.name, fileType: file.type, size: file.size, data: uint8 },
+            isMine: true,
+            status: 'sending'
+        };
+        addMessage(destId, optMsg);
+
+        try {
+            // Processing in background
+            const { ciphertext, bundle } = await signalManager.encryptMedia(uint8, file.name, file.type);
+
+            const contentObj = {
+                type: 'file_v2',
+                id: msgId,
+                bundle,
+                data: ciphertext,
+                size: uint8.length
+            };
+
+            if (chat?.isGroup) {
+                const targets = [];
+                for (const member of chat.members!) {
+                    if (member === state.identityHash) continue;
+                    const payload = { ...contentObj, groupId: destId };
+                    const wrapped = await signalManager.encrypt(member, JSON.stringify(payload), state.relayUrl);
+                    targets.push({ to: member, body: wrapped.body, msg_type: wrapped.type });
+                }
+                network.sendJSON({ type: 'group_multicast', targets });
+            } else {
+                const wrapped = await signalManager.encrypt(destId, JSON.stringify(contentObj), state.relayUrl);
+                network.sendBinary(destId, new TextEncoder().encode(JSON.stringify(wrapped)));
+            }
+
+            // Update status to sent
+            userStore.update(s => {
+                if (s.chats[destId]) {
+                    const m = s.chats[destId].messages.find(x => x.id === msgId);
+                    if (m) m.status = 'sent';
+                }
+                return { ...s, chats: { ...s.chats } };
+            });
+        } catch (e) {
+            console.error("[Messaging] Failed to send media:", e);
+            userStore.update(s => {
+                if (s.chats[destId]) {
+                    const m = s.chats[destId].messages.find(x => x.id === msgId);
+                    if (m) m.status = 'failed';
+                }
+                return { ...s, chats: { ...s.chats } };
+            });
+        }
+    };
+    reader.readAsArrayBuffer(file);
+};
+
+export const sendVoiceNote = async (destId: string, audioBlob: Blob) => {
+    const state = get(userStore);
+    if (!state.identityHash) return;
+    const chat = state.chats[destId];
+
+    const buffer = await audioBlob.arrayBuffer();
+    const uint8 = new Uint8Array(buffer);
+    const msgId = crypto.randomUUID();
+
+    // Optimistic UI: Add message immediately
+    const optMsg: Message = {
+        id: msgId,
+        timestamp: Date.now(),
+        senderHash: state.identityHash!,
+        content: "[Voice Note]",
+        type: 'voice_note',
+        groupId: chat?.isGroup ? destId : undefined,
+        attachment: { fileName: 'voice_note.wav', fileType: 'audio/wav', size: uint8.length, data: uint8 },
+        isMine: true,
+        status: 'sending'
+    };
+    addMessage(destId, optMsg);
+
+    try {
+        const contentObj = {
+            type: 'voice_note',
+            data: toBase64(uint8),
+            id: msgId,
+            fileName: 'voice_note.wav',
+            fileType: 'audio/wav',
             size: uint8.length
         };
 
@@ -161,69 +246,27 @@ export const sendFile = async (destId: string, file: File) => {
             network.sendJSON({ type: 'group_multicast', targets });
         } else {
             const wrapped = await signalManager.encrypt(destId, JSON.stringify(contentObj), state.relayUrl);
-            network.sendBinary(destId, new TextEncoder().encode(JSON.stringify(wrapped)));
+            network.sendBinary(destId, new TextEncoder().encode(JSON.stringify(wrapped)), { id: msgId });
         }
 
-        const msg: Message = {
-            id: msgId,
-            timestamp: Date.now(),
-            senderHash: state.identityHash!,
-            content: `File: ${file.name}`,
-            type: 'file',
-            groupId: chat?.isGroup ? destId : undefined,
-            attachment: { fileName: file.name, fileType: file.type, size: file.size, data: uint8 },
-            isMine: true, status: 'sent'
-        };
-        addMessage(destId, msg);
-    };
-    reader.readAsArrayBuffer(file);
-};
-
-export const sendVoiceNote = async (destId: string, audioBlob: Blob) => {
-    const state = get(userStore);
-    if (!state.identityHash) return;
-    const chat = state.chats[destId];
-
-    const buffer = await audioBlob.arrayBuffer();
-    const uint8 = new Uint8Array(buffer);
-    const msgId = crypto.randomUUID();
-
-    const contentObj = {
-        type: 'voice_note',
-        data: toBase64(uint8),
-        id: msgId,
-        fileName: 'voice_note.wav',
-        fileType: 'audio/wav',
-        size: uint8.length
-    };
-
-    if (chat?.isGroup) {
-        const targets = [];
-        for (const member of chat.members!) {
-            if (member === state.identityHash) continue;
-            const payload = { ...contentObj, groupId: destId };
-            const wrapped = await signalManager.encrypt(member, JSON.stringify(payload), state.relayUrl);
-            targets.push({ to: member, body: wrapped.body, msg_type: wrapped.type });
-        }
-        network.sendJSON({ type: 'group_multicast', targets });
-    } else {
-        const wrapped = await signalManager.encrypt(destId, JSON.stringify(contentObj), state.relayUrl);
-        network.sendBinary(destId, new TextEncoder().encode(JSON.stringify(wrapped)), { id: msgId });
+        // Update status to sent
+        userStore.update(s => {
+            if (s.chats[destId]) {
+                const m = s.chats[destId].messages.find(x => x.id === msgId);
+                if (m) m.status = 'sent';
+            }
+            return { ...s, chats: { ...s.chats } };
+        });
+    } catch (e) {
+        console.error("[Messaging] Failed to send voice note:", e);
+        userStore.update(s => {
+            if (s.chats[destId]) {
+                const m = s.chats[destId].messages.find(x => x.id === msgId);
+                if (m) m.status = 'failed';
+            }
+            return { ...s, chats: { ...s.chats } };
+        });
     }
-
-    const msg: Message = {
-        id: msgId,
-        timestamp: Date.now(),
-        senderHash: state.identityHash,
-        content: "[Voice Note]",
-        type: 'voice_note',
-        groupId: chat?.isGroup ? destId : undefined,
-        attachment: { fileName: 'voice_note.wav', fileType: 'audio/wav', size: uint8.length, data: uint8 },
-        isMine: true,
-        status: 'sent'
-    };
-    await attachmentStore.put(msgId, uint8);
-    addMessage(destId, msg);
 };
 
 // Process decrypted/plaintext payload
@@ -377,15 +420,39 @@ export const handleIncomingMessage = async (payload: Uint8Array | ServerMessage,
         const state = get(userStore);
         if (!state.identityHash) return;
 
+        let senderHashPrefix: string | undefined = undefined;
         let incomingObj: any;
+
         if (payload instanceof Uint8Array) {
             let lastIndex = payload.length;
             while (lastIndex > 0 && payload[lastIndex - 1] === 0) lastIndex--;
             const trimmedPayload = payload.slice(0, lastIndex);
-            const payloadStr = new TextDecoder().decode(trimmedPayload);
-            try { incomingObj = JSON.parse(payloadStr); } catch (e) { return; }
+
+            // The server now prepends 64 bytes of sender identity hash to binary payloads
+            if (trimmedPayload.length >= 64) {
+                const potentialHeader = new TextDecoder().decode(trimmedPayload.slice(0, 64));
+                if (/^[0-9a-f]{64}$/i.test(potentialHeader)) {
+                    senderHashPrefix = potentialHeader;
+                    const payloadStr = new TextDecoder().decode(trimmedPayload.slice(64));
+                    try { incomingObj = JSON.parse(payloadStr); } catch (e) { return; }
+                } else {
+                    const payloadStr = new TextDecoder().decode(trimmedPayload);
+                    try { incomingObj = JSON.parse(payloadStr); } catch (e) { return; }
+                }
+            } else {
+                const payloadStr = new TextDecoder().decode(trimmedPayload);
+                try { incomingObj = JSON.parse(payloadStr); } catch (e) { return; }
+            }
         } else {
             incomingObj = payload;
+        }
+
+        if (!incomingObj) return;
+
+        // Skip non-payload server messages
+        const skipTypes = ['relay_success', 'delivery_status', 'auth_success', 'error', 'ping', 'pong', 'dummy_ack', 'dummy_pacing'];
+        if (incomingObj.type && skipTypes.includes(incomingObj.type)) {
+            return;
         }
 
         if (incomingObj.type === 'binary_payload' && incomingObj.data_hex) {
@@ -394,7 +461,7 @@ export const handleIncomingMessage = async (payload: Uint8Array | ServerMessage,
             return handleIncomingMessage(decoded, incomingObj.sender);
         }
 
-        let senderHash = overrideSender || incomingObj.sender || "unknown";
+        const finalSenderHash: string = overrideSender || senderHashPrefix || incomingObj.sender || "unknown";
 
         // Handle generic fragments
         if (incomingObj.type === 'msg_fragment') {
@@ -402,25 +469,52 @@ export const handleIncomingMessage = async (payload: Uint8Array | ServerMessage,
             if (!fragmentReassembly[fragId]) {
                 fragmentReassembly[fragId] = {
                     total: incomingObj.total,
+                    received: 0,
                     chunks: {},
                     timestamp: Date.now()
                 };
             }
             const assembly = fragmentReassembly[fragId];
-            assembly.chunks[incomingObj.index] = fromBase64(incomingObj.data);
+            if (assembly.chunks[incomingObj.index]) return; // Skip duplicates
 
-            if (Object.keys(assembly.chunks).length === assembly.total) {
-                let totalLen = 0;
-                for (let i = 0; i < assembly.total; i++) totalLen += assembly.chunks[i].length;
-                const fullData = new Uint8Array(totalLen);
-                let offset = 0;
-                for (let i = 0; i < assembly.total; i++) {
-                    fullData.set(assembly.chunks[i], offset);
-                    offset += assembly.chunks[i].length;
-                }
-                delete fragmentReassembly[fragId];
-                // Process the reassembled message as if it came in one piece
-                return handleIncomingMessage(fullData, senderHash);
+            assembly.chunks[incomingObj.index] = fromBase64(incomingObj.data);
+            assembly.received++;
+
+            if (assembly.received % 10 === 0 || assembly.received === assembly.total) {
+                console.debug(`[Messaging] Receiving fragment ${fragId}: ${assembly.received}/${assembly.total} chunks...`);
+            }
+
+            if (assembly.received === assembly.total) {
+                // Offload reassembly to prevent UI hang
+                setTimeout(() => {
+                    if (!fragmentReassembly[fragId]) return; // Already processed
+
+                    console.log(`[Messaging] Reassembling fragment ${fragId} (${assembly.total} chunks)...`);
+                    let totalLen = 0;
+                    const chunkList = [];
+                    for (let i = 0; i < assembly.total; i++) {
+                        const chunk = assembly.chunks[i];
+                        if (!chunk) {
+                            console.error(`[Messaging] Missing chunk ${i} for fragment ${fragId}`);
+                            return;
+                        }
+                        chunkList.push(chunk);
+                        totalLen += chunk.length;
+                    }
+
+                    const fullData = new Uint8Array(totalLen);
+                    let offset = 0;
+                    for (const chunk of chunkList) {
+                        fullData.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+
+                    delete fragmentReassembly[fragId];
+                    console.debug(`[Messaging] Reassembled ${totalLen} bytes for ${fragId}. Processing...`);
+                    // Use a separate microtask for decryption/processing
+                    handleIncomingMessage(fullData, finalSenderHash);
+                }, 0);
+                return;
             }
             return; // Wait for more fragments
         }
@@ -433,21 +527,16 @@ export const handleIncomingMessage = async (payload: Uint8Array | ServerMessage,
 
         // Handle direct messages
         // Try to "decrypt" (unwrap plaintext)
-        const decrypted = await signalManager.decrypt(senderHash, incomingObj);
+        const decrypted = await signalManager.decrypt(finalSenderHash, incomingObj);
 
         if (decrypted) {
-            // If we got a result, it means the structure matched our plaintext wrapper
-            // The result from 'decrypt' is the INNER JSON object (or string)
-            // We need to pass THAT to processPayload, but processPayload expects string.
-            // signalManager.decrypt returns JSON.parse(body).
-            // So we need to stringify it back or update processPayload to handle objects.
-            // Actually processPayload mainly does JSON.parse. 
-            // Let's create a helper or just pass JSON string.
+            console.debug(`[Messaging] Decrypted direct message from ${finalSenderHash}`);
             const bodyStr = typeof decrypted === 'string' ? decrypted : JSON.stringify(decrypted);
-            await processPayload(senderHash, bodyStr);
+            await processPayload(finalSenderHash, bodyStr);
         } else {
-            // Fallback: treat raw as message?
+            console.warn(`[Messaging] Failed to decrypt direct message from ${finalSenderHash}`, incomingObj);
         }
-
-    } catch (e) { }
+    } catch (e) {
+        console.error("[Messaging] Critical error in handleIncomingMessage:", e);
+    }
 };

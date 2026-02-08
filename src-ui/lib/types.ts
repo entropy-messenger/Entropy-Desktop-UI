@@ -20,6 +20,7 @@ export interface Message {
         fileType?: string;
         size?: number;
         data?: Uint8Array;
+        isDownloaded?: boolean;
     };
     groupId?: string;
     isMine: boolean;

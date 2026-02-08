@@ -429,7 +429,7 @@
                                 {/if}
 
                                 {#if (msg.type === 'voice_note' || msg.type === 'file') && msg.attachment}
-                                    <AttachmentRenderer {msg} />
+                                    <AttachmentRenderer {msg} chatId={activeChat.peerHash} />
                                 {:else}
                                     <div class="text-[14px] leading-relaxed whitespace-pre-wrap break-all overflow-hidden">{msg.content}</div>
                                 {/if}

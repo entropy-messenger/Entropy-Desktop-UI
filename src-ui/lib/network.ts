@@ -147,6 +147,14 @@ export class NetworkLayer {
                 connectionStatus: 'connected'
             }));
 
+            // If server says our keys are missing, upload them now
+            if (msg.keys_missing) {
+                const serverUrl = get(userStore).relayUrl;
+                import('./signal_manager').then(({ signalManager }) => {
+                    signalManager.ensureKeysUploaded(serverUrl).catch(e => console.error("Auto key upload failed:", e));
+                });
+            }
+
             // Once authenticated, flush any messages waiting in the persistent outbox
             invoke('flush_outbox').catch(e => console.error("[Network] Flush failed:", e));
 
@@ -174,6 +182,10 @@ export class NetworkLayer {
             return;
         }
 
+        if (msg.type === 'relay_success' || msg.type === 'delivery_status') {
+            return;
+        }
+
         if (msg.type === 'queued_message') {
             await logicStore.handleIncomingMessage(msg.payload);
             return;
@@ -185,7 +197,7 @@ export class NetworkLayer {
     sendJSON(data: any) {
         try {
             let msg = JSON.stringify(data);
-            invoke('send_to_network', { msg, isBinary: false, metadata: data }).catch(e => {
+            invoke('send_to_network', { msg, data: null, isBinary: false, metadata: data }).catch(e => {
                 if (e.toString().includes("queued")) {
                     console.debug("[Network] Message queued in persistent outbox");
                 } else {
@@ -207,10 +219,9 @@ export class NetworkLayer {
         packet.set(hashBytes, 0);
         packet.set(data, 64);
 
-        const hex = Array.from(packet).map(b => b.toString(16).padStart(2, '0')).join('');
-
         try {
-            invoke('send_to_network', { msg: hex, isBinary: true, metadata }).catch(e => {
+            // High performance binary transfer: pass Uint8Array directly to Tauri
+            invoke('send_to_network', { msg: null, data: packet, isBinary: true, metadata }).catch(e => {
                 if (e.toString().includes("queued")) {
                     console.debug("[Network] Binary queued in persistent outbox");
                 } else {

@@ -1,5 +1,5 @@
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use futures_util::{Stream, Sink, SinkExt, StreamExt};
@@ -12,11 +12,29 @@ use serde_json::json;
 use base64::Engine;
 use tokio_tungstenite::tungstenite::Utf8Bytes;
 use crate::app_state::{DbState, NetworkState, AudioState, PacedMessage};
+use crate::signal_store::SqliteSignalStore;
+use libsignal_protocol::{
+    IdentityKey, IdentityKeyPair, PreKeyBundle, ProtocolAddress,
+    SignalProtocolError, PreKeyRecord, SignedPreKeyRecord, KyberPreKeyRecord,
+    PreKeyId, SignedPreKeyId, KyberPreKeyId, Timestamp, kem, GenericSignedPreKey, KeyPair,
+    CiphertextMessage, CiphertextMessageType, message_encrypt, message_decrypt, process_prekey_bundle,
+    DeviceId, IdentityKeyStore, PreKeyStore, SignedPreKeyStore, KyberPreKeyStore
+};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 const PACING_INTERVAL: u64 = 500;
 const MEDIA_INTERVAL: u64 = 10;
 const PACKET_SIZE: usize = 1536;
-const CHUNK_SIZE: usize = 32 * 1024;
+const MEDIA_CHUNK_SIZE: usize = 100 * 1024;
+
+fn flexible_decode(s: &str) -> Result<Vec<u8>, String> {
+    if let Ok(b) = hex::decode(s) {
+        return Ok(b);
+    }
+    // Attempt standard base64 decoding
+    base64::engine::general_purpose::STANDARD.decode(s.trim()).map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 pub async fn start_native_recording(app: AppHandle, state: State<'_, AudioState>) -> Result<String, String> {
@@ -97,6 +115,12 @@ pub fn init_vault(app: tauri::AppHandle, state: State<'_, DbState>, passphrase: 
     let db_path = app_data_dir.join(get_db_filename());
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
 
+    // Enable encryption if passphrase is provided
+    if !passphrase.is_empty() {
+        let key_query = format!("PRAGMA key = '{}';", passphrase.replace("'", "''"));
+        conn.execute_batch(&key_query).map_err(|e| format!("Encryption error: {}", e))?;
+    }
+
     // Enable WAL mode for better concurrency
     let _ = conn.execute("PRAGMA journal_mode=WAL;", []);
 
@@ -118,6 +142,81 @@ pub fn init_vault(app: tauri::AppHandle, state: State<'_, DbState>, passphrase: 
         )",
         [],
     ).map_err(|e: rusqlite::Error| e.to_string())?;
+
+    // Check for schema migration (v2 identity table with ID primary key)
+    let has_id_col: bool = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('signal_identity') WHERE name='id'",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0) > 0;
+
+    if !has_id_col {
+        let _ = conn.execute("DROP TABLE IF EXISTS signal_identity;", []);
+    }
+
+    // Signal Protocol Tables
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS signal_identity (
+            id INTEGER PRIMARY KEY CHECK (id = 0),
+            registration_id INTEGER,
+            public_key BLOB,
+            private_key BLOB
+        )",
+        [],
+    ).map_err(|e| format!("Failed to create signal_identity: {}", e))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS signal_pre_keys (
+            key_id INTEGER PRIMARY KEY,
+            key_data BLOB
+        )",
+        [],
+    ).map_err(|e| format!("Failed to create signal_pre_keys: {}", e))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS signal_signed_pre_keys (
+            key_id INTEGER PRIMARY KEY,
+            key_data BLOB,
+            signature BLOB,
+            timestamp INTEGER
+        )",
+        [],
+    ).map_err(|e| format!("Failed to create signal_signed_pre_keys: {}", e))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS signal_sessions (
+            address TEXT PRIMARY KEY,
+            session_data BLOB
+        )",
+        [],
+    ).map_err(|e| format!("Failed to create signal_sessions: {}", e))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS signal_identities_remote (
+            address TEXT PRIMARY KEY,
+            public_key BLOB NOT NULL,
+            trust_level INTEGER DEFAULT 0
+        );",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS signal_kyber_pre_keys (
+            key_id INTEGER PRIMARY KEY,
+            key_data BLOB NOT NULL
+        );",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS signal_kyber_base_keys_seen (
+            kyber_prekey_id INTEGER NOT NULL,
+            ec_prekey_id INTEGER NOT NULL,
+            base_key BLOB NOT NULL,
+            PRIMARY KEY (kyber_prekey_id, ec_prekey_id, base_key)
+        );",
+        [],
+    ).map_err(|e| e.to_string())?;
 
     let mut db_conn = state.conn.lock().unwrap();
     *db_conn = Some(conn);
@@ -331,16 +430,23 @@ pub async fn connect_network(
 pub async fn send_to_network(
     app: AppHandle,
     state: State<'_, NetworkState>, 
-    msg: String, 
+    msg: Option<String>, 
+    data: Option<Vec<u8>>,
     is_binary: bool,
     metadata: Option<serde_json::Value> 
 ) -> Result<(), String> {
     let sender_lock = state.sender.lock().unwrap();
     if let Some(tx) = &*sender_lock {
         if is_binary {
-            let bytes = if let Ok(b) = hex::decode(&msg) { b } else { msg.into_bytes() };
+            let bytes = if let Some(d) = data {
+                d
+            } else if let Some(m) = msg {
+                if let Ok(b) = hex::decode(&m) { b } else { m.into_bytes() }
+            } else {
+                return Err("Missing binary data".into());
+            };
             
-            if bytes.len() > CHUNK_SIZE {
+            if bytes.len() > MEDIA_CHUNK_SIZE {
                 if bytes.len() < 64 { return Err("Invalid binary packet: too short for routing hash".into()); }
                 
                 let (hash_bytes, data_bytes) = bytes.split_at(64);
@@ -351,11 +457,11 @@ pub async fn send_to_network(
                     .unwrap_or("unknown_media")
                     .to_string();
                 
-                let total_chunks = (data_bytes.len() as f64 / CHUNK_SIZE as f64).ceil() as usize;
+                let total_chunks = (data_bytes.len() as f64 / MEDIA_CHUNK_SIZE as f64).ceil() as usize;
 
                 for i in 0..total_chunks {
-                    let start = i * CHUNK_SIZE;
-                    let end = std::cmp::min(start + CHUNK_SIZE, data_bytes.len());
+                    let start = i * MEDIA_CHUNK_SIZE;
+                    let end = std::cmp::min(start + MEDIA_CHUNK_SIZE, data_bytes.len());
                     let chunk_slice = &data_bytes[start..end];
                     
                     let fragment_obj = json!({
@@ -380,7 +486,8 @@ pub async fn send_to_network(
                 }).map_err(|e: mpsc::error::SendError<PacedMessage>| e.to_string())?;
             }
         } else {
-            let mut padded = msg;
+            let actual_msg = msg.ok_or("Missing message text")?;
+            let mut padded = actual_msg;
             if padded.len() < PACKET_SIZE {
                 padded.push_str(&" ".repeat(PACKET_SIZE - padded.len()));
             }
@@ -396,9 +503,16 @@ pub async fn send_to_network(
         let conn_lock = db_lock.conn.lock().unwrap();
         if let Some(conn) = conn_lock.as_ref() {
             let (msg_type, content) = if is_binary {
-                ("binary", hex::decode(&msg).unwrap_or_default())
+                let bytes = if let Some(d) = data {
+                    d
+                } else if let Some(m) = msg {
+                    if let Ok(b) = hex::decode(&m) { b } else { m.into_bytes() }
+                } else {
+                    Vec::new()
+                };
+                ("binary", bytes)
             } else {
-                ("text", msg.into_bytes())
+                ("text", msg.unwrap_or_default().into_bytes())
             };
             
             let _ = conn.execute(
@@ -553,4 +667,250 @@ pub async fn import_database(app: tauri::AppHandle, state: State<'_, DbState>, s
     std::fs::copy(backup_path, &dest_path).map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn signal_init(state: State<'_, DbState>) -> Result<String, String> {
+    tauri::async_runtime::block_on(async move {
+        let store = SqliteSignalStore::new(&state);
+        
+        // Check if identity already exists
+        if let Ok(kp) = store.get_identity_key_pair().await {
+            let pub_key = kp.identity_key().serialize();
+            return Ok(hex::encode(pub_key));
+        }
+
+        let mut rng = StdRng::from_os_rng();
+        let identity_key_pair = IdentityKeyPair::generate(&mut rng);
+        let registration_id: u32 = rand::random::<u32>() & 0x3FFF;
+
+        let pub_bytes = identity_key_pair.identity_key().serialize();
+        let priv_bytes = identity_key_pair.private_key().serialize();
+
+        let db_lock = state.conn.lock().unwrap();
+        let conn = db_lock.as_ref().ok_or("Database not initialized")?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO signal_identity (id, registration_id, public_key, private_key) VALUES (0, ?1, ?2, ?3)",
+            params![registration_id, &pub_bytes[..], &priv_bytes[..]],
+        ).map_err(|e: rusqlite::Error| e.to_string())?;
+
+        Ok(hex::encode(pub_bytes))
+    })
+}
+
+#[tauri::command]
+pub fn signal_get_bundle(state: State<'_, DbState>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::block_on(async move {
+        let mut rng = StdRng::from_os_rng();
+        let mut store = SqliteSignalStore::new(&state);
+        
+        let identity_key_pair = store.get_identity_key_pair().await.map_err(|e: SignalProtocolError| e.to_string())?;
+        let registration_id: u32 = store.get_local_registration_id().await.map_err(|e: SignalProtocolError| e.to_string())?;
+
+        println!("[Signal] Creating bundle for local user. RegistrationId: {}", registration_id);
+
+        // Generate PreKey
+        let pre_key_id = PreKeyId::from(rand::random::<u32>() & 0x00FFFFFF);
+        let pre_key_pair = KeyPair::generate(&mut rng);
+        let pre_key_record = PreKeyRecord::new(pre_key_id, &pre_key_pair);
+        println!("[Signal] Generated new PreKey: {}", u32::from(pre_key_id));
+        store.save_pre_key(pre_key_id, &pre_key_record).await.map_err(|e| e.to_string())?;
+
+        // Generate Signed PreKey
+        let signed_pre_key_id = SignedPreKeyId::from(rand::random::<u32>() & 0x00FFFFFF);
+        let signed_pre_key_pair = KeyPair::generate(&mut rng);
+        let timestamp = Timestamp::from_epoch_millis(
+            std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64
+        );
+        let signature = identity_key_pair.private_key().calculate_signature(&signed_pre_key_pair.public_key.serialize(), &mut rng)
+            .map_err(|e| e.to_string())?;
+        let signed_pre_key_record = SignedPreKeyRecord::new(signed_pre_key_id, timestamp, &signed_pre_key_pair, &signature);
+        println!("[Signal] Generated new SignedPreKey: {}", u32::from(signed_pre_key_id));
+        store.save_signed_pre_key(signed_pre_key_id, &signed_pre_key_record).await.map_err(|e| e.to_string())?;
+
+        // Generate Kyber PreKey
+        let kyber_pre_key_id = KyberPreKeyId::from(rand::random::<u32>() & 0x00FFFFFF);
+        let kyber_pre_key_record = KyberPreKeyRecord::generate(kem::KeyType::Kyber1024, kyber_pre_key_id, identity_key_pair.private_key())
+            .map_err(|e| e.to_string())?;
+        println!("[Signal] Generated new KyberPreKey: {}", u32::from(kyber_pre_key_id));
+        store.save_kyber_pre_key(kyber_pre_key_id, &kyber_pre_key_record).await.map_err(|e| e.to_string())?;
+
+        Ok(serde_json::json!({
+            "registrationId": registration_id,
+            "identityKey": hex::encode(identity_key_pair.identity_key().serialize()),
+            "preKey": {
+                "id": u32::from(pre_key_id),
+                "publicKey": hex::encode(pre_key_pair.public_key.serialize())
+            },
+            "signedPreKey": {
+                "id": u32::from(signed_pre_key_id),
+                "publicKey": hex::encode(signed_pre_key_pair.public_key.serialize()),
+                "signature": hex::encode(signature)
+            },
+            "kyberPreKey": {
+                "id": u32::from(kyber_pre_key_id),
+                "publicKey": hex::encode(kyber_pre_key_record.public_key().map_err(|e| e.to_string())?.serialize()),
+                "signature": hex::encode(kyber_pre_key_record.signature().map_err(|e| e.to_string())?)
+            }
+        }))
+    })
+}
+
+#[tauri::command]
+pub fn signal_establish_session(
+    state: State<'_, DbState>,
+    remote_hash: String,
+    bundle: serde_json::Value,
+) -> Result<(), String> {
+    tauri::async_runtime::block_on(async move {
+        let mut store = SqliteSignalStore::new(&state);
+        let address = ProtocolAddress::new(remote_hash.clone(), DeviceId::try_from(1u32).expect("valid ID"));
+
+        let registration_id = bundle["registrationId"].as_u64().ok_or("Missing registrationId")? as u32;
+        let identity_key_hex = bundle["identityKey"].as_str().ok_or("Missing identityKey")?;
+        let identity_key = IdentityKey::decode(&flexible_decode(identity_key_hex)?)
+            .map_err(|e| e.to_string())?;
+        
+        println!("[Signal] Establishing session with {} (registration_id={}, idKey={})", remote_hash, registration_id, identity_key_hex);
+
+        // Handle both 'preKey' (object) and 'preKeys' (array with at least one element)
+        let (pre_key_id, pre_key_pub) = if let Some(pre_key_obj) = bundle.get("preKey") {
+            let id = PreKeyId::from(pre_key_obj["id"].as_u64().ok_or("Missing preKey id")? as u32);
+            let pub_bytes = flexible_decode(pre_key_obj["publicKey"].as_str().ok_or("Missing preKey publicKey")?)?;
+            let pub_key = libsignal_protocol::PublicKey::deserialize(&pub_bytes).map_err(|e| e.to_string())?;
+            println!("[Signal] Using one-time PreKey {}", u32::from(id));
+            (id, pub_key)
+        } else if let Some(pre_keys_arr) = bundle.get("preKeys").and_then(|v| v.as_array()) {
+            if pre_keys_arr.is_empty() { return Err("preKeys array is empty".into()); }
+            let first = &pre_keys_arr[0];
+            let id = PreKeyId::from(first["id"].as_u64().ok_or("Missing preKey id in array")? as u32);
+            let pub_bytes = flexible_decode(first["publicKey"].as_str().ok_or("Missing preKey publicKey in array")?)?;
+            let pub_key = libsignal_protocol::PublicKey::deserialize(&pub_bytes).map_err(|e| e.to_string())?;
+            println!("[Signal] Using one-time PreKey {} from preKeys array", u32::from(id));
+            (id, pub_key)
+        } else {
+            return Err("Missing preKey or preKeys in bundle".into());
+        };
+        
+        let signed_pre_key_id = SignedPreKeyId::from(bundle["signedPreKey"]["id"].as_u64().ok_or("Missing signedPreKey id")? as u32);
+        let signed_pre_key_pub = libsignal_protocol::PublicKey::deserialize(&flexible_decode(bundle["signedPreKey"]["publicKey"].as_str().ok_or("Missing signedPreKey publicKey")?)?)
+            .map_err(|e| e.to_string())?;
+        let signed_pre_key_sig = flexible_decode(bundle["signedPreKey"]["signature"].as_str().ok_or("Missing signedPreKey signature")?)?;
+
+        let kyber_pre_key_id = KyberPreKeyId::from(bundle["kyberPreKey"]["id"].as_u64().ok_or("Missing kyberPreKey id")? as u32);
+        let kyber_pre_key_pub = kem::PublicKey::deserialize(&flexible_decode(bundle["kyberPreKey"]["publicKey"].as_str().ok_or("Missing kyberPreKey publicKey")?)?)
+            .map_err(|e| e.to_string())?;
+        let kyber_pre_key_sig = flexible_decode(bundle["kyberPreKey"]["signature"].as_str().ok_or("Missing kyberPreKey signature")?)?;
+
+        let bundle = PreKeyBundle::new(
+            registration_id,
+            DeviceId::try_from(1u32).expect("valid ID"),
+            Some((pre_key_id, pre_key_pub)),
+            signed_pre_key_id,
+            signed_pre_key_pub,
+            signed_pre_key_sig,
+            kyber_pre_key_id,
+            kyber_pre_key_pub,
+            kyber_pre_key_sig,
+            identity_key,
+        ).map_err(|e| e.to_string())?;
+
+        let mut rng = StdRng::from_os_rng();
+        process_prekey_bundle(
+            &address,
+            &mut store.clone(),
+            &mut store,
+            &bundle,
+            std::time::SystemTime::now(),
+            &mut rng,
+        ).await.map_err(|e| e.to_string())?;
+
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub fn signal_encrypt(
+    state: State<'_, DbState>,
+    remote_hash: String,
+    message: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::block_on(async move {
+        let mut store = SqliteSignalStore::new(&state);
+        let address = ProtocolAddress::new(remote_hash.clone(), DeviceId::try_from(1u32).expect("valid ID"));
+        let mut rng = StdRng::from_os_rng();
+
+        let ciphertext = message_encrypt(
+            message.as_bytes(),
+            &address,
+            &mut store.clone(),
+            &mut store,
+            std::time::SystemTime::now(),
+            &mut rng,
+        ).await.map_err(|e| e.to_string())?;
+
+        let (type_val, body) = match ciphertext {
+            CiphertextMessage::SignalMessage(m) => {
+                println!("[Signal] Encrypted Whisper message to {}", remote_hash);
+                (CiphertextMessageType::Whisper, m.serialized().to_vec())
+            },
+            CiphertextMessage::PreKeySignalMessage(m) => {
+                println!("[Signal] Encrypted PreKey message to {}", remote_hash);
+                (CiphertextMessageType::PreKey, m.serialized().to_vec())
+            },
+            _ => return Err("Unsupported ciphertext type".into()),
+        };
+
+        Ok(serde_json::json!({
+            "type": type_val as u8,
+            "body": base64::engine::general_purpose::STANDARD.encode(body)
+        }))
+    })
+}
+
+#[tauri::command]
+pub fn signal_decrypt(
+    state: State<'_, DbState>,
+    remote_hash: String,
+    msg_obj: serde_json::Value,
+) -> Result<String, String> {
+    tauri::async_runtime::block_on(async move {
+        let mut store = SqliteSignalStore::new(&state);
+        let address = ProtocolAddress::new(remote_hash.clone(), DeviceId::try_from(1u32).expect("valid ID"));
+        let mut rng = StdRng::from_os_rng();
+
+        let message_type = msg_obj["type"].as_u64().ok_or("Missing type")? as u8;
+        let body_str = msg_obj["body"].as_str().ok_or("Missing body")?;
+        let message_body = base64::engine::general_purpose::STANDARD.decode(body_str)
+            .map_err(|e| format!("Base64 decode failed: {}", e))?;
+
+        println!("[Signal] Decrypting message from {} (type={})", remote_hash, message_type);
+
+        let ciphertext_type = CiphertextMessageType::try_from(message_type)
+            .map_err(|_| "Invalid message type")?;
+
+        let ciphertext = match ciphertext_type {
+            CiphertextMessageType::Whisper => CiphertextMessage::SignalMessage(
+                libsignal_protocol::SignalMessage::try_from(message_body.as_slice()).map_err(|e| e.to_string())?
+            ),
+            CiphertextMessageType::PreKey => CiphertextMessage::PreKeySignalMessage(
+                libsignal_protocol::PreKeySignalMessage::try_from(message_body.as_slice()).map_err(|e| e.to_string())?
+            ),
+            _ => return Err("Unsupported ciphertext type".into()),
+        };
+
+        let ptext = message_decrypt(
+            &ciphertext,
+            &address,
+            &mut store.clone(),
+            &mut store.clone(),
+            &mut store.clone(),
+            &store.clone(),
+            &mut store,
+            &mut rng,
+        ).await.map_err(|e| e.to_string())?;
+
+        String::from_utf8(ptext).map_err(|e| e.to_string())
+    })
 }

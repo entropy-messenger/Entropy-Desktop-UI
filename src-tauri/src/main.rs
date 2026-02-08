@@ -4,6 +4,7 @@
 mod audio;
 mod app_state;
 mod commands;
+mod signal_store;
 #[cfg(test)]
 mod tests;
 
@@ -51,7 +52,12 @@ fn main() {
             commands::stop_native_recording,
             commands::save_file,
             commands::export_database,
-            commands::import_database
+            commands::import_database,
+            commands::signal_init,
+            commands::signal_get_bundle,
+            commands::signal_establish_session,
+            commands::signal_encrypt,
+            commands::signal_decrypt
         ])
         .setup(|app| {
             // Setup tray and menu as before

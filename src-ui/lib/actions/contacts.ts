@@ -209,9 +209,17 @@ export const registerGlobalNickname = async (nickname: string) => {
 };
 
 export const lookupNickname = async (nickname: string): Promise<string | null> => {
+    const input = nickname.trim();
+    if (!input) return null;
+
+    // Fast-path: if it's already a hash, just return it
+    if (input.length === 64 && /^[0-9a-fA-F]+$/.test(input)) {
+        return input;
+    }
+
     try {
         const serverUrl = get(userStore).relayUrl;
-        const response = await fetch(`${serverUrl}/nickname/lookup?name=${encodeURIComponent(nickname)}`);
+        const response = await fetch(`${serverUrl}/nickname/lookup?name=${encodeURIComponent(input)}`);
         if (response.status === 200) {
             const data = await response.json();
             return data[nickname] || data.identity_hash || null;
@@ -247,8 +255,8 @@ export const startChat = (peerHash: string, alias?: string) => {
             }
         });
 
+        s.chats[peerHash].unreadCount = 0;
         if (unreadIds.length > 0) {
-            s.chats[peerHash].unreadCount = 0;
             sendReceipt(peerHash, unreadIds, 'read');
         }
 

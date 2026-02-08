@@ -98,8 +98,9 @@
   };
 
   const createChatPrompt = async () => {
-    const input = prompt("Enter Peer ID Hash (64-char Hex) or Global Nickname:");
+    let input = prompt("Enter Peer ID Hash (64-char Hex) or Global Nickname:");
     if (!input) return;
+    input = input.trim();
 
     if (input.length === 64 && /^[0-9a-fA-F]+$/.test(input)) {
         startChat(input);

@@ -75,11 +75,7 @@ export const vaultDelete = async (key: string): Promise<void> => {
 export const hasVault = async (): Promise<boolean> => {
     if (isTauri()) {
         try {
-            // Directly try to open and read. This handles both existence and validity.
-            await invoke('init_vault', { passphrase: "unused" });
-            const id = await invoke('vault_load', { key: "plaintext_identity" });
-            console.debug("[hasVault] Check result:", !!id);
-            return !!id;
+            return await invoke('vault_exists');
         } catch (e) {
             console.error("[hasVault] Check failed:", e);
             return false;
